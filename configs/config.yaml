@@ -1,0 +1,32 @@
+# FacePred — Main Hydra Config
+# ==============================
+# Override any value via CLI: python scripts/train.py model=rssm_s training.lr=3e-4
+# See configs/ subdirectories for all configurable options.
+
+defaults:
+  - model: rssm_xs
+  - data: meld
+  - feature: audio
+  - training: default
+  - _self_
+
+# === Project ===
+project:
+  name: facepred
+  seed: 42
+  device: auto  # auto | cpu | cuda
+  debug: false
+
+# === Paths ===
+paths:
+  data_root: ${oc.env:FACEPRED_DATA,./data}
+  feature_root: ${oc.env:FACEPRED_FEATURES,./features}
+  checkpoint_dir: ${oc.env:FACEPRED_CKPT,./checkpoints}
+  log_dir: ${oc.env:FACEPRED_LOGS,./logs}
+
+# === Logging ===
+logging:
+  backend: wandb  # wandb | tensorboard | none
+  wandb_project: facepred
+  wandb_entity: null  # set to your W&B username/team
+  log_every_n_steps: 10

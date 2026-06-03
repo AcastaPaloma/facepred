@@ -1,0 +1,63 @@
+# Default Training Configuration
+trainer:
+  max_epochs: 50
+  accelerator: auto       # auto | cpu | gpu
+  devices: 1
+  precision: 32           # 32 | 16-mixed | bf16-mixed
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 10
+  
+  # Early stopping
+  early_stopping:
+    monitor: val/loss
+    patience: 10
+    mode: min
+
+  # Checkpointing
+  checkpoint:
+    monitor: val/turn_f1
+    mode: max
+    save_top_k: 3
+
+# === Optimization ===
+optimizer:
+  name: adamw             # adamw | adam | sgd
+  lr: 1.0e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+
+scheduler:
+  name: cosine_warmup     # cosine_warmup | constant | step | one_cycle
+  warmup_fraction: 0.05   # Fraction of total steps for warmup
+  min_lr: 1.0e-6
+
+# === Data Loading ===
+dataloader:
+  batch_size: 32
+  num_workers: 2           # Low because of i5-8400T
+  pin_memory: false        # false for CPU training
+  drop_last: true
+  sequence_length_s: 5.0   # Conversation window length
+
+# === Multi-Task Loss Weights ===
+loss_weights:
+  rssm_dynamics: 1.0       # KL(posterior || prior) + state prediction
+  turn_taking: 1.0          # Hold/shift/BC/overlap classification
+  end_of_turn: 0.5          # Time-to-yield regression + buckets
+  dialog_act: 0.5           # Dialog act classification
+  affect: 0.3               # Valence/arousal + emotion
+  calibration: 0.3           # Brier score on uncertainty
+  
+loss_weighting: fixed       # fixed | uncertainty | gradnorm
+
+# === Augmentation ===
+augmentation:
+  modality_dropout: 0.2      # Per-modality dropout probability
+  noise:
+    enabled: true
+    snr_range: [5, 30]       # dB range for additive noise
+  temporal_jitter:
+    enabled: true
+    max_shift_frames: 1      # ±1 frame random shift

@@ -1,0 +1,62 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# === Virtual Environments ===
+.venv/
+venv/
+env/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === Jupyter ===
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# === Data & Checkpoints (large files) ===
+data/
+datasets/
+checkpoints/
+outputs/
+logs/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.h5
+*.tar.gz
+*.zip
+
+# === Extracted Features (large) ===
+features/
+extracted/
+
+# === Weights & Biases ===
+wandb/
+
+# === Hydra outputs ===
+outputs/
+multirun/
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Misc ===
+*.log
+.env
+.secrets

@@ -1,0 +1,53 @@
+# FacePred Conda Environment
+# ============================
+# Setup instructions:
+#   1. Open Anaconda Prompt (conda shell)
+#   2. cd to project directory
+#   3. conda env create -f environment.yml
+#   4. conda activate facepred
+#
+# NOTE: PyTorch installs as CPU-only via pip.
+# For Colab/cloud GPU, PyTorch+CUDA comes pre-installed.
+
+name: facepred
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11.9
+  - numpy<2.0
+  - scipy
+  - pandas
+  - matplotlib
+  - seaborn
+  - pip
+  - pip:
+      # === Core ML ===
+      - torch==2.1.2
+      - torchaudio==2.1.2
+      - torchvision==0.16.2
+      # === Training Framework ===
+      - pytorch-lightning>=2.1,<2.3
+      - hydra-core>=1.3
+      - omegaconf>=2.3
+      - wandb
+      # === Feature Extraction ===
+      - mediapipe>=0.10.9
+      - opensmile>=2.5
+      - pyannote.audio>=3.1
+      - openai-whisper>=20231117
+      - transformers>=4.36
+      - datasets>=2.16
+      # === Audio Processing ===
+      - librosa>=0.10
+      - soundfile
+      - sounddevice
+      # === Video Processing ===
+      - opencv-python>=4.8
+      # === Utilities ===
+      - einops>=0.7
+      - rich>=13.0
+      - peft>=0.7
+      # === Code Quality ===
+      - pytest>=7.4
+      - ruff

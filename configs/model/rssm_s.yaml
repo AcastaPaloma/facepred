@@ -1,0 +1,65 @@
+# RSSM S — Iteration 1+ (multimodal)
+# GRU=256, categorical latent, full heads
+
+rssm:
+  gru_hidden: 256
+  latent_type: categorical
+  categorical_classes: 32
+  categorical_dims: 16
+  gaussian_dim: 64
+
+step_duration_ms: 100
+prediction_horizons_ms: [200, 1000]
+
+encoders:
+  visual:
+    input_dim: 1493
+    hidden_dim: 256
+    output_dim: 128
+    num_layers: 2
+    dropout: 0.1
+  audio_prosody:
+    input_dim: 88
+    hidden_dim: 128
+    output_dim: 128
+    num_layers: 2
+    dropout: 0.1
+  audio_ssl:
+    input_dim: 768
+    output_dim: 128
+    dropout: 0.1
+  vad:
+    input_dim: 3
+    output_dim: 32
+  text:
+    input_dim: 384
+    output_dim: 128
+    dropout: 0.1
+  quality:
+    input_dim: 4
+    output_dim: 32
+
+fusion:
+  type: cross_attention
+  embed_dim: 256
+  num_heads: 4
+  dropout: 0.1
+  reliability: learned
+
+heads:
+  turn_taking:
+    num_classes: 4
+    hidden_dim: 256
+  end_of_turn:
+    num_buckets: 10
+    hidden_dim: 256
+  dialog_act:
+    num_classes: 13
+    hidden_dim: 256
+  affect:
+    type: both
+    num_emotions: 7
+    hidden_dim: 128
+  uncertainty:
+    method: entropy
+    hidden_dim: 128

@@ -1,0 +1,38 @@
+# Audio Feature Configuration
+audio:
+  # openSMILE prosody
+  prosody:
+    feature_set: eGeMAPSv02     # eGeMAPSv02 | ComParE_2016 | IS09_emotion
+    feature_level: functionals  # functionals | lld (low-level descriptors)
+    
+  # SSL embeddings
+  ssl:
+    model_name: facebook/wav2vec2-base-960h
+    layer: -1                    # Which transformer layer to extract from (-1 = last)
+    use_fp16: true
+    chunk_length_s: 10.0         # Process audio in chunks to manage memory
+    
+  # Voice Activity Detection
+  vad:
+    model: pyannote/segmentation-3.0
+    min_duration_on: 0.1         # Minimum speech segment duration (seconds)
+    min_duration_off: 0.1        # Minimum silence segment duration (seconds)
+    
+  # ASR
+  asr:
+    model: small                 # tiny | small | medium | large
+    language: en
+    streaming: true
+    chunk_length_s: 5.0
+
+# Visual Feature Configuration (for reference, active in iter 1+)
+visual:
+  extractor: mediapipe           # mediapipe | openface
+  fps: 30
+  components:
+    - landmarks                  # 478 * 3 = 1434 dims
+    - blendshapes                # 52 dims
+    - head_pose                  # 6 dims (rotation + translation)
+    - confidence                 # 1 dim
+  min_detection_confidence: 0.5
+  min_tracking_confidence: 0.5

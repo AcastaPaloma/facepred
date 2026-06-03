@@ -1,0 +1,71 @@
+# RSSM XS — Iteration 0 (audio-only baseline)
+# GRU=128, categorical latent, minimal heads
+
+rssm:
+  gru_hidden: 128
+  latent_type: categorical  # categorical | gaussian
+  categorical_classes: 16
+  categorical_dims: 8
+  # Combined state dim: 128 + (16 * 8) = 256
+  
+  # Gaussian params (used only if latent_type=gaussian)
+  gaussian_dim: 32
+
+step_duration_ms: 100  # World model update rate
+prediction_horizons_ms: [200, 1000]  # Prediction horizons
+
+# === Modality Encoders ===
+encoders:
+  visual:
+    input_dim: 1493   # landmarks(478*3) + blendshapes(52) + head_pose(6) + confidence(1)
+    hidden_dim: 128
+    output_dim: 64
+    num_layers: 2
+    dropout: 0.1
+  audio_prosody:
+    input_dim: 88     # eGeMAPS features
+    hidden_dim: 64
+    output_dim: 64
+    num_layers: 2
+    dropout: 0.1
+  audio_ssl:
+    input_dim: 768    # wav2vec2-base
+    output_dim: 64
+    dropout: 0.1
+  vad:
+    input_dim: 3      # VAD + overlap + speaker
+    output_dim: 16
+  text:
+    input_dim: 384    # Whisper small encoder dim
+    output_dim: 64
+    dropout: 0.1
+  quality:
+    input_dim: 4      # SNR + face_conf + ASR_conf + missing_mask
+    output_dim: 16
+
+# === Fusion ===
+fusion:
+  type: cross_attention  # cross_attention | concat | perceiver
+  embed_dim: 128
+  num_heads: 4
+  dropout: 0.1
+  reliability: learned  # learned | heuristic
+
+# === Prediction Heads ===
+heads:
+  turn_taking:
+    num_classes: 4    # hold, shift, backchannel, overlap
+    hidden_dim: 128
+  end_of_turn:
+    num_buckets: 10   # Time-to-yield discretized into 10 bins
+    hidden_dim: 128
+  dialog_act:
+    num_classes: 13   # Collapsed DAMSL taxonomy
+    hidden_dim: 128
+  affect:
+    type: both        # both | continuous | categorical
+    num_emotions: 7   # MELD emotions (categorical branch)
+    hidden_dim: 64
+  uncertainty:
+    method: entropy   # entropy | ensemble | mc_dropout | conformal
+    hidden_dim: 64
