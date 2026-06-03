@@ -26,11 +26,11 @@ env/
 *.ipynb_checkpoints
 
 # === Data & Checkpoints (large files) ===
-data/
-datasets/
-checkpoints/
-outputs/
-logs/
+/data/
+/datasets/
+/checkpoints/
+/outputs/
+/logs/
 *.pt
 *.pth
 *.ckpt
@@ -41,15 +41,15 @@ logs/
 *.zip
 
 # === Extracted Features (large) ===
-features/
-extracted/
+/features/
+/extracted/
 
 # === Weights & Biases ===
 wandb/
 
 # === Hydra outputs ===
-outputs/
-multirun/
+/outputs/
+/multirun/
 
 # === OS ===
 .DS_Store

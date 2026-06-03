@@ -30,3 +30,24 @@ logging:
   wandb_project: facepred
   wandb_entity: null  # set to your W&B username/team
   log_every_n_steps: 10
+
+# === Precompute / Gating ===
+engine:
+  precompute_k: 3
+  gate_yield_threshold: 0.8
+  gate_entropy_max: 0.5
+  gate_margin_min: 0.3
+  yield_class_index: 1  # hold=0, shift/yield=1, backchannel=2, overlap=3
+
+# === Inference ===
+inference:
+  device: cpu
+  features:
+    - mediapipe
+    - opensmile
+    - whisper_tiny
+
+# === Evaluation ===
+evaluation:
+  primary_metric: effective_latency
+  bootstrap_samples: 10000

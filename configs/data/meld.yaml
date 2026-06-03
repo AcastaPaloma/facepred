@@ -1,0 +1,43 @@
+# MELD Dataset Configuration
+dataset:
+  name: meld
+  version: raw
+  
+  # Download source
+  download_url: "https://huggingface.co/datasets/declare-lab/MELD/resolve/main/MELD.Raw.tar.gz"
+  hf_dataset_id: "declare-lab/MELD"
+  
+  # Splits
+  splits:
+    train: train
+    val: dev
+    test: test
+  
+  # Label configuration
+  emotions:
+    - neutral
+    - surprise
+    - fear
+    - sadness
+    - joy
+    - disgust
+    - anger
+  
+  sentiments:
+    - negative
+    - neutral
+    - positive
+
+  # Turn-taking label derivation
+  turn_labels:
+    silence_threshold_ms: 300    # Gap shorter than this → hold/backchannel
+    backchannel_max_duration_ms: 1500  # Utterance shorter than this could be backchannel
+    overlap_iou_threshold: 0.1   # Overlap ratio to count as overlapping speech
+    
+  # Preprocessing
+  audio:
+    sample_rate: 16000
+    mono: true
+  video:
+    fps: 30
+    min_face_confidence: 0.5
