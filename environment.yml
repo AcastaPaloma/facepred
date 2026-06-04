@@ -15,13 +15,15 @@ channels:
   - defaults
 dependencies:
   - python=3.11.9
-  - numpy<2.0
+  - numpy>=1.26,<2.0
   - scipy
   - pandas
   - matplotlib
   - seaborn
   - pip
   - pip:
+      # Keep pip's resolver from upgrading the conda NumPy pin.
+      - numpy==1.26.4
       # === Core ML ===
       - torch==2.1.2
       - torchaudio==2.1.2
@@ -32,22 +34,28 @@ dependencies:
       - omegaconf>=2.3
       - wandb
       # === Feature Extraction ===
-      - mediapipe>=0.10.9
+      - mediapipe>=0.10.9,<0.11
       - opensmile>=2.5
-      - pyannote.audio>=3.1
+      - pyannote.audio==3.1.1
+      - pyannote.core==5.0.0
+      - pyannote.database==5.1.0
+      - pyannote.metrics==3.2.1
+      - pyannote.pipeline==3.0.1
       - openai-whisper>=20231117
-      - transformers>=4.36
-      - datasets>=2.16
+      - transformers==4.36.2
+      - datasets==2.16.1
       # === Audio Processing ===
       - librosa>=0.10
       - soundfile
       - sounddevice
       # === Video Processing ===
-      - opencv-python>=4.8
+      - opencv-python==4.9.0.80
+      - opencv-contrib-python==4.9.0.80
       # === Utilities ===
       - einops>=0.7
       - rich>=13.0
-      - peft>=0.7
+      - accelerate==0.25.0
+      - peft==0.7.1
       # === Code Quality ===
       - pytest>=7.4
       - ruff

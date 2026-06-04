@@ -69,3 +69,6 @@ python scripts/demo.py
 The current build is designed to prove tensor contracts and control flow on CPU. Real MELD media extraction, full training recipes, and calibrated latency experiments come after the synthetic path is stable.
 
 See [`task.md`](task.md) for the current build tracker.
+
+For a fuller build log, codebase inventory, and training-readiness notes, see
+[`docs/iteration0_technical_report.md`](docs/iteration0_technical_report.md).

@@ -11,7 +11,6 @@ how much to trust each modality at each timestep. Signals include:
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import numpy as np
 import torch
@@ -83,10 +82,10 @@ class QualityEstimator:
 
     def compute(
         self,
-        audio: Optional[torch.Tensor] = None,
+        audio: torch.Tensor | None = None,
         face_confidence: float = 0.0,
         asr_confidence: float = 0.0,
-        available_modalities: Optional[list[str]] = None,
+        available_modalities: list[str] | None = None,
     ) -> torch.Tensor:
         """Compute quality signals for a single timestep.
 

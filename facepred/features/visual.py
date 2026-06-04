@@ -8,9 +8,8 @@ All processing runs on CPU at 30+ FPS.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -131,11 +130,11 @@ class VisualExtractor:
             self._is_initialized = True
             logger.info("MediaPipe Face Landmarker initialized successfully")
 
-        except ImportError:
+        except ImportError as exc:
             raise ImportError(
                 "mediapipe is required for visual feature extraction. "
                 "Install with: pip install mediapipe"
-            )
+            ) from exc
 
     def _get_model_path(self) -> Path:
         """Get path to MediaPipe face landmarker model, downloading if needed."""
@@ -227,9 +226,9 @@ class VisualExtractor:
 
     def extract_video(
         self,
-        video_path: Union[str, Path],
+        video_path: str | Path,
         fps: int = 30,
-        max_frames: Optional[int] = None,
+        max_frames: int | None = None,
     ) -> list[VisualFeatures]:
         """Extract visual features from all frames of a video file.
 
@@ -243,8 +242,10 @@ class VisualExtractor:
         """
         try:
             import cv2
-        except ImportError:
-            raise ImportError("opencv-python is required. Install with: pip install opencv-python")
+        except ImportError as exc:
+            raise ImportError(
+                "opencv-python is required. Install with: pip install opencv-python"
+            ) from exc
 
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():

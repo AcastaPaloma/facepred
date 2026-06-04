@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import torch
 
@@ -23,10 +24,7 @@ def _latest_probs(predictions: Mapping[str, Any]) -> torch.Tensor:
         return torch.tensor([0.7, 0.2, 0.05, 0.05], dtype=torch.float32)
     tensor = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
     tensor = tensor.detach().float().cpu()
-    if tensor.ndim == 1:
-        probs = tensor
-    else:
-        probs = tensor.reshape(-1, tensor.shape[-1])[-1]
+    probs = tensor if tensor.ndim == 1 else tensor.reshape(-1, tensor.shape[-1])[-1]
     return probs / probs.sum().clamp_min(1e-8)
 
 

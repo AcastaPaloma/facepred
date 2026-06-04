@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -407,7 +408,6 @@ def collate_meld_dialogues(
         raise ValueError("Cannot collate an empty sample list")
 
     lengths = torch.tensor([len(sample["start_s"]) for sample in samples], dtype=torch.long)
-    batch_size = len(samples)
     max_len = int(lengths.max().item())
     mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
 
@@ -431,7 +431,7 @@ def collate_meld_dialogues(
 
     if "features" in samples[0]:
         batch["features"] = {}
-        for key in samples[0]["features"].keys():
+        for key in samples[0]["features"]:
             batch["features"][key] = _pad_tensor(
                 [sample["features"][key] for sample in samples],
                 max_len,

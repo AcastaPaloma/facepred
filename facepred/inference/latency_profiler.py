@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from statistics import mean
-from typing import Any, Callable, Iterator
+from typing import Any
 
 
 @dataclass(slots=True)

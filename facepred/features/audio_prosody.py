@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -77,15 +76,15 @@ class ProsodyExtractor:
                 feature_set=getattr(opensmile.FeatureSet, self.feature_set),
                 feature_level=getattr(opensmile.FeatureLevel, self.feature_level),
             )
-        except ImportError:
+        except ImportError as exc:
             raise ImportError(
                 "opensmile is required for prosody extraction. "
                 "Install with: pip install opensmile"
-            )
+            ) from exc
 
     def extract(
         self,
-        waveform: Union[np.ndarray, torch.Tensor],
+        waveform: np.ndarray | torch.Tensor,
         sample_rate: int = 16000,
     ) -> torch.Tensor:
         """Extract prosody features from an audio waveform.
@@ -114,7 +113,7 @@ class ProsodyExtractor:
 
         return features
 
-    def extract_file(self, audio_path: Union[str, Path]) -> torch.Tensor:
+    def extract_file(self, audio_path: str | Path) -> torch.Tensor:
         """Extract prosody features from an audio file.
 
         Args:
@@ -132,7 +131,7 @@ class ProsodyExtractor:
 
     def extract_windowed(
         self,
-        waveform: Union[np.ndarray, torch.Tensor],
+        waveform: np.ndarray | torch.Tensor,
         sample_rate: int = 16000,
         window_ms: int = 100,
         hop_ms: int = 100,

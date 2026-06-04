@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 import torch
 
@@ -264,7 +265,7 @@ class PrecomputeEngine:
         return {
             "branch": branch_name,
             "status": "prepared",
-            "context_keys": sorted(str(key) for key in context.keys()),
+            "context_keys": sorted(str(key) for key in context),
         }
 
     @staticmethod

@@ -7,8 +7,9 @@ for iteration 0 so they can run in CPU smoke tests and with synthetic data.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 import torch
 from torch import nn
@@ -132,7 +133,7 @@ class ModalityEncoders(nn.Module):
         self.input_dims = {name: spec.input_dim for name, spec in self.specs.items()}
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any]) -> "ModalityEncoders":
+    def from_config(cls, config: Mapping[str, Any]) -> ModalityEncoders:
         specs = {name: spec_from_config(value) for name, value in config.items()}
         return cls(specs)
 

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 import torch
 from torch import nn
@@ -36,7 +37,7 @@ class FacePredWorldModel(nn.Module):
         self.heads = heads
 
     @classmethod
-    def from_config(cls, config: Any) -> "FacePredWorldModel":
+    def from_config(cls, config: Any) -> FacePredWorldModel:
         """Construct the model from ``configs/model/*.yaml`` style config."""
         enc_cfg = _get(config, "encoders")
         if enc_cfg is None:

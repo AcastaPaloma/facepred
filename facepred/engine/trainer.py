@@ -1,9 +1,9 @@
 """Lightweight training scaffolds for FacePred.
 
-The real RSSM/fusion stack is not in the repository yet, so this module keeps a
-small PyTorch model and loop that exercise the expected batch and prediction
-contracts. It is intentionally useful with synthetic tensors and avoids Hydra,
-Lightning, W&B, and feature extractor imports at module import time.
+This module currently provides a tiny recurrent trainer that exercises the
+expected batch and prediction contracts. The real RSSM/fusion world model exists
+under ``facepred.models``; wiring that model into a production training loop is
+the next implementation step.
 """
 
 from __future__ import annotations
@@ -11,9 +11,10 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from collections.abc import Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, MutableMapping, Optional
+from typing import Any
 
 import torch
 from torch import nn
@@ -188,7 +189,7 @@ class TrainingResult:
 
     epochs: int
     train_loss: float
-    val_loss: Optional[float] = None
+    val_loss: float | None = None
     metrics: dict[str, float] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
