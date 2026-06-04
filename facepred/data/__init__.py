@@ -10,6 +10,17 @@ from facepred.data.augmentations import (
     full_like,
     temporal_shift,
 )
+from facepred.data.cached import (
+    CACHE_VERSION,
+    CachedSequenceDataset,
+    CacheManifest,
+    CacheShard,
+    collate_cached_sequences,
+    load_cache_shard,
+    make_cached_dataloader,
+    save_cache_shard,
+    write_cache_manifest,
+)
 from facepred.data.label_derivation import (
     DIALOG_ACT_LABELS,
     DIALOG_ACT_TO_ID,
@@ -55,6 +66,10 @@ from facepred.data.synchronizer import (
 __all__ = [
     "AdditiveGaussianNoise",
     "AugmentationResult",
+    "CACHE_VERSION",
+    "CacheManifest",
+    "CacheShard",
+    "CachedSequenceDataset",
     "DEFAULT_FEATURE_DIMS",
     "DIALOG_ACT_LABELS",
     "DIALOG_ACT_TO_ID",
@@ -80,6 +95,7 @@ __all__ = [
     "add_meld_media_paths",
     "bucket_time_to_yield",
     "canonical_meld_split",
+    "collate_cached_sequences",
     "collate_meld_dialogues",
     "derive_timestep_labels",
     "derive_utterance_labels",
@@ -89,11 +105,15 @@ __all__ = [
     "full_like",
     "infer_dialog_act",
     "load_meld_split",
+    "load_cache_shard",
+    "make_cached_dataloader",
     "make_synthetic_feature_dict",
     "make_synthetic_meld_dataframe",
     "make_synthetic_synchronized_batch",
     "make_time_grid",
     "normalize_meld_dataframe",
     "parse_time_seconds",
+    "save_cache_shard",
     "temporal_shift",
+    "write_cache_manifest",
 ]

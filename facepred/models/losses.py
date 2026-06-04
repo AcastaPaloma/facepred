@@ -100,7 +100,7 @@ class FacePredLoss(nn.Module):
             pred = predictions["valence_arousal"]
             target = targets["valence_arousal"].to(device=pred.device, dtype=pred.dtype)
             target = match_prediction_shape(pred, target)
-            va_loss = F.mse_loss(pred, target)
+            va_loss = masked_mse_loss(pred, target, targets.get("mask"))
             components["valence_arousal"] = va_loss
             total = total + self.weights["affect"] * va_loss
 
@@ -173,6 +173,24 @@ def multiclass_brier_score(logits: torch.Tensor, targets: torch.Tensor, ignore_i
     one_hot = F.one_hot(targets.clamp_min(0), num_classes=logits.shape[-1]).to(probs.dtype)
     squared = (probs - one_hot).pow(2).sum(dim=-1)
     return squared[valid].mean()
+
+
+def masked_mse_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """MSE with optional sequence mask shaped ``[batch, steps]``."""
+    squared = (prediction - target).pow(2)
+    if mask is None:
+        return squared.mean()
+    mask = match_prediction_shape(squared[..., 0], mask.to(device=prediction.device, dtype=torch.bool))
+    while mask.ndim < squared.ndim:
+        mask = mask.unsqueeze(-1)
+    mask = mask.expand_as(squared)
+    if not mask.any():
+        return torch.zeros((), device=prediction.device, dtype=prediction.dtype)
+    return squared[mask].mean()
 
 
 def match_prediction_shape(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

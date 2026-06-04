@@ -72,3 +72,7 @@ See [`task.md`](task.md) for the current build tracker.
 
 For a fuller build log, codebase inventory, and training-readiness notes, see
 [`docs/iteration0_technical_report.md`](docs/iteration0_technical_report.md).
+
+For the Colab cache/training workflow, see
+[`docs/colab_training.md`](docs/colab_training.md) and
+[`notebooks/facepred_colab_quickstart.ipynb`](notebooks/facepred_colab_quickstart.ipynb).

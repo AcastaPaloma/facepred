@@ -24,3 +24,11 @@
 - [x] Unit tests (`test_models.py`, `test_data.py`, `test_features.py`, `test_fusion.py`)
 - [x] Smoke test: forward pass through full pipeline
 - [x] Verify training loop runs on CPU with synthetic data
+
+## Phase 5: Colab Training Lane
+- [x] Cached sequence dataset and manifest/shard format
+- [x] MELD cheap-feature cache preparation script
+- [x] Real `FacePredWorldModel` cache training script
+- [x] Checkpoint/resume support (`last.pt`, `best.pt`, step checkpoints)
+- [x] Cached checkpoint evaluation script
+- [x] Colab runbook and quickstart notebook

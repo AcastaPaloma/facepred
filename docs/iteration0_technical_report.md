@@ -6,7 +6,7 @@ FacePred Iteration 0 is a validated code scaffold for a predictive multimodal in
 
 The current build is not yet a real corpus training run. It proves the contracts that real training will rely on: fixed-rate multimodal tensors, derived turn-taking labels, reliability-gated fusion, RSSM state propagation, multi-horizon prediction heads, multitask losses, conservative precompute gating, and CPU-safe smoke workflows.
 
-The recommended next move is to implement a cache-first real training pipeline rather than trying to train directly from raw audio/video. On a tight schedule and with weak local hardware, the fastest credible path is:
+The next-stage Colab training lane is now implemented as a cache-first real training pipeline rather than a raw audio/video training loop. On a tight schedule and with weak local hardware, the fastest credible path is:
 
 1. Create fixed-rate MELD feature/label caches.
 2. Train the real `FacePredWorldModel` from those caches.
@@ -51,8 +51,13 @@ Implemented under `facepred/data/`:
   - Modality dropout.
   - Temporal jitter.
   - Composed `MultimodalAugmentor`.
+- `cached.py`
+  - `manifest.json` + `.pt` shard cache format.
+  - `CachedSequenceDataset`.
+  - Cached sequence collation and DataLoader helper.
+  - Intended for Colab/local-runtime training reads.
 
-Current limitation: the data layer normalizes metadata and synthesizes smoke features, but it does not yet create persistent feature caches from real MELD media.
+Current limitation: the cache path creates cheap metadata-derived features. Expensive media-derived modalities are still planned as later cache passes.
 
 ### Feature Layer
 
@@ -162,13 +167,20 @@ Implemented under `scripts/`:
   - Synthetic or CSV/JSON turn-label derivation.
 - `demo.py`
   - Terminal inference/precompute gate demo.
+- `prepare_meld_cache.py`
+  - Builds Colab-friendly cache shards from synthetic or real MELD metadata.
+  - Generates timing-derived VAD, hashed text features, and quality features.
+- `train_world_model.py`
+  - Trains the real `FacePredWorldModel` from cached shards.
+  - Saves `last.pt`, `best.pt`, optional step checkpoints, `metrics.jsonl`, and `run_config.json`.
+  - Supports `--resume auto`, CUDA device auto-detection, and AMP.
+- `evaluate_world_model.py`
+  - Loads a world-model checkpoint and reports cached-split metrics.
 
 Current limitation: scripts do not yet include:
 
-- real MELD download/prepare
-- persistent feature cache generation
-- real `FacePredWorldModel` training from cache
-- Colab notebook bootstrap
+- real MELD download automation
+- expensive media-derived feature cache generation
 
 ### Tests
 
@@ -179,6 +191,7 @@ Implemented under `tests/`:
 - `test_fusion.py`
 - `test_models.py`
 - `test_utils.py`
+- `test_cached.py`
 
 Latest validation in the `facepred` conda environment:
 
@@ -190,7 +203,7 @@ python -m ruff check .
 All checks passed.
 
 python -m pytest -q
-16 passed.
+17 passed.
 
 python scripts/train.py --epochs 1 --batches 1 --val-batches 1 --batch-size 2 --seq-len 4 --feature-dim 32
 Passed with no NumPy/Torch/Transformers compatibility warnings.
@@ -269,47 +282,27 @@ Colab Enterprise documentation lists GPU default runtimes around L4/T4 availabil
 
 ## Recommended Next Implementation Plan
 
-### Step 1: Commit Current Iteration 0
+### Step 1: Commit Current Colab Training Lane
 
-The current state is green and worth preserving. Before starting the real loop, commit this as the stable scaffold.
+The current state is green and worth preserving. It now includes the cache-first real world-model training lane.
 
-### Step 2: Add A Cache-First Real Training Path
+### Step 2: Run A Synthetic Cache Smoke On Colab
 
-Build these files next:
+Use `docs/colab_training.md` or `notebooks/facepred_colab_quickstart.ipynb` to run:
 
-- `facepred/data/cached.py`
-  - Load feature shards with keys `features`, `labels`, `mask`, `metadata`.
-  - Return tensors aligned to the existing world-model contract.
-- `scripts/prepare_meld_cache.py`
-  - Read MELD CSV metadata.
-  - Derive fixed-rate labels.
-  - Produce an MVP feature cache.
-- `scripts/train_world_model.py`
-  - Instantiate `FacePredWorldModel.from_config`.
-  - Train with `FacePredLoss`.
-  - Save checkpoints, metrics JSON, and config snapshot.
-- `scripts/evaluate_world_model.py`
-  - Load checkpoint.
-  - Report dev/test loss, turn accuracy, macro-F1, calibration, and per-horizon metrics.
-- `notebooks/facepred_colab_quickstart.ipynb`
-  - Clone repo.
-  - Install pinned dependencies.
-  - Mount Drive.
-  - Prepare/cache data.
-  - Train and checkpoint.
+1. `prepare_meld_cache.py --synthetic`
+2. `train_world_model.py --resume auto`
+3. `evaluate_world_model.py`
 
-### Step 3: Use Cheap Real Features First
+### Step 3: Run Real MELD Metadata Cache
 
-For the first real training run, avoid full media extraction. Use:
+Point `--data-root` at raw MELD in Drive and prepare `meld_cheap_v0`.
 
-- VAD from utterance timing intervals.
-- Text features from a deterministic hashed bag-of-words or lightweight local encoder.
-- Quality features from known availability/confidence.
-- Zero-filled visual/audio_ssl/prosody channels where unavailable.
+### Step 4: Train The First Real Checkpoint
 
-This gives a real-label, real-split, real-training pipeline quickly. It will not be the final multimodal result, but it will prove the end-to-end training path and produce a checkpoint.
+Train `world_xs_cheap_v0` from the local Colab runtime cache while writing checkpoints and metrics to Drive.
 
-### Step 4: Add Expensive Features Incrementally
+### Step 5: Add Expensive Features Incrementally
 
 After the cache trainer works:
 
@@ -355,7 +348,7 @@ Low risk:
 
 ## Decision Recommendation
 
-Start the real training loop, but only after adding the cache-first dataset and training script. Do not start by running raw audio/video feature extraction inside training.
+Start the real training loop through the new cache-first scripts. Do not train directly from raw audio/video.
 
 The fastest pushable milestone is:
 
