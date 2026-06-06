@@ -6,7 +6,11 @@ import argparse
 import json
 import shutil
 import subprocess
+import urllib.request
 from pathlib import Path
+
+ANNOTATION_BASE_URL = "https://raw.githubusercontent.com/declare-lab/MELD/master/data/MELD"
+ANNOTATION_FILENAMES = ("train_sent_emo.csv", "dev_sent_emo.csv", "test_sent_emo.csv")
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,8 +57,8 @@ def main() -> int:
             shutil.move(str(downloaded), archive)
 
     extract_dir = Path(args.extract_dir)
-    expected = list(extract_dir.rglob("train_sent_emo.csv")) if extract_dir.exists() else []
-    if args.force_extract or not expected:
+    media_files = list(extract_dir.rglob("dia*_utt*.mp4")) if extract_dir.exists() else []
+    if args.force_extract or not media_files:
         local_archive = Path(args.local_archive)
         if local_archive.resolve() == archive.resolve():
             pass
@@ -66,9 +70,22 @@ def main() -> int:
             check=True,
         )
 
+    annotation_dir = extract_dir / "MELD.Raw" / "annotations"
+    annotation_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ANNOTATION_FILENAMES:
+        matches = list(extract_dir.rglob(filename))
+        if not matches:
+            urllib.request.urlretrieve(
+                f"{ANNOTATION_BASE_URL}/{filename}",
+                annotation_dir / filename,
+            )
+
     csvs = sorted(str(path) for path in extract_dir.rglob("*_sent_emo.csv"))
     if not csvs:
         raise FileNotFoundError(f"MELD CSV files were not found after extracting {archive}")
+    media_files = list(extract_dir.rglob("dia*_utt*.mp4"))
+    if not media_files:
+        raise FileNotFoundError(f"MELD MP4 files were not found after extracting {archive}")
     print(
         json.dumps(
             {
@@ -76,6 +93,7 @@ def main() -> int:
                 "archive_gb": round(archive.stat().st_size / 1_000_000_000, 2),
                 "extract_dir": str(extract_dir),
                 "csvs": csvs,
+                "media_files": len(media_files),
             },
             indent=2,
         )

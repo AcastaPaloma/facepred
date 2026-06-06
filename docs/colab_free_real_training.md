@@ -85,7 +85,8 @@ Do not replace Colab's CUDA-enabled PyTorch installation.
 ## 2. Download And Stage MELD
 
 This downloads the official `declare-lab/MELD` raw archive to Drive once, copies
-it to local runtime storage, and extracts it locally:
+it to local runtime storage, extracts it locally, and downloads the official
+train/dev/test annotation CSVs from the MELD GitHub repository:
 
 ```bash
 python scripts/stage_meld_colab.py \
@@ -96,6 +97,9 @@ python scripts/stage_meld_colab.py \
 
 The archive is approximately 10.9 GB. This is a download and local extraction,
 not training-time streaming.
+
+The staging command must finish with JSON containing three `csvs` entries and a
+nonzero `media_files` count before running cache preparation.
 
 ## 3. Build The Real Audio Cache
 
