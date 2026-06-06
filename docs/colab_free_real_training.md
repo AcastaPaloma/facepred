@@ -99,7 +99,21 @@ The archive is approximately 10.9 GB. This is a download and local extraction,
 not training-time streaming.
 
 The staging command must finish with JSON containing three `csvs` entries and a
-nonzero `media_files` count before running cache preparation.
+nonzero `media_files` count before running cache preparation. It validates that
+the Drive archive is approximately 10.9 GB and recursively extracts MELD's
+nested split archives when present.
+
+If staging reports that the archive is undersized, remove the bad Drive copy
+and rerun:
+
+```bash
+rm -f /content/drive/MyDrive/facepred/data/MELD.Raw.tar.gz
+rm -f /content/MELD.Raw.tar.gz
+python scripts/stage_meld_colab.py \
+  --archive /content/drive/MyDrive/facepred/data/MELD.Raw.tar.gz \
+  --local-archive /content/MELD.Raw.tar.gz \
+  --extract-dir /content/facepred_data
+```
 
 ## 3. Build The Real Audio Cache
 
