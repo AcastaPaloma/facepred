@@ -84,6 +84,8 @@ def main() -> int:
     requested_modalities = parse_modalities(args.modalities)
     modalities = resolve_modalities(requested_modalities, input_dims, args.include_zero_modalities)
     label_config = label_config_from_project(data_cfg, model_cfg)
+    horizons_ms = [int(value) for value in model_cfg.get("prediction_horizons_ms", [200, 1000])]
+    horizon_steps = [max(1, int(round(value / step_ms))) for value in horizons_ms]
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -105,6 +107,7 @@ def main() -> int:
             step_ms=step_ms,
             sequence_length=sequence_length,
             stride_steps=stride_steps,
+            horizon_steps=horizon_steps,
             seed=args.seed,
         )
         split_shards[canonical_split] = write_split_shards(
@@ -126,6 +129,9 @@ def main() -> int:
             "sequence_length_s": sequence_length_s,
             "stride_s": stride_s,
             "config": str(Path(args.config)),
+            "horizons_ms": horizons_ms,
+            "causal_features": False,
+            "oracle_text": "text" in modalities,
         },
     )
 
@@ -224,6 +230,7 @@ def build_split_sequences(
     step_ms: int,
     sequence_length: int,
     stride_steps: int,
+    horizon_steps: Sequence[int],
     seed: int,
 ) -> list[dict[str, Any]]:
     normalized = normalize_meld_dataframe(frame, split=split)
@@ -239,7 +246,7 @@ def build_split_sequences(
             input_dims=input_dims,
             seed=seed + stable_int(str(dialogue_id), modulo=100_000),
         )
-        targets = build_step_targets(projected)
+        targets = build_step_targets(projected, horizon_steps=horizon_steps)
         windows = window_dialogue(
             features=features,
             targets=targets,
@@ -434,16 +441,41 @@ def hashed_text_embedding(text: str, dim: int) -> torch.Tensor:
     return vector / norm
 
 
-def build_step_targets(projected: pd.DataFrame) -> dict[str, torch.Tensor]:
-    return {
+def build_step_targets(
+    projected: pd.DataFrame,
+    *,
+    horizon_steps: Sequence[int],
+) -> dict[str, torch.Tensor]:
+    """Build genuinely future-shifted targets for every prediction horizon."""
+
+    categorical = {
         "turn_taking": torch.as_tensor(projected["turn_taking"].to_numpy(dtype=np.int64).copy()),
         "end_of_turn": torch.as_tensor(projected["end_of_turn"].to_numpy(dtype=np.int64).copy()),
         "dialog_act": torch.as_tensor(projected["dialog_act"].to_numpy(dtype=np.int64).copy()),
         "emotion": torch.as_tensor(projected["emotion"].to_numpy(dtype=np.int64).copy()),
-        "valence_arousal": torch.as_tensor(
-            projected[["valence", "arousal"]].to_numpy(dtype=np.float32).copy()
-        ),
     }
+    continuous = torch.as_tensor(
+        projected[["valence", "arousal"]].to_numpy(dtype=np.float32).copy()
+    )
+    length = len(projected)
+    horizon_mask = torch.zeros(length, len(horizon_steps), dtype=torch.bool)
+    targets: dict[str, torch.Tensor] = {
+        name: torch.full((length, len(horizon_steps)), TURN_IGNORE_INDEX, dtype=torch.long)
+        for name in categorical
+    }
+    targets["valence_arousal"] = torch.zeros(length, len(horizon_steps), 2, dtype=torch.float32)
+
+    for horizon_idx, offset in enumerate(horizon_steps):
+        valid = max(0, length - int(offset))
+        if valid <= 0:
+            continue
+        horizon_mask[:valid, horizon_idx] = True
+        for name, values in categorical.items():
+            targets[name][:valid, horizon_idx] = values[offset : offset + valid]
+        targets["valence_arousal"][:valid, horizon_idx] = continuous[offset : offset + valid]
+
+    targets["horizon_mask"] = horizon_mask
+    return targets
 
 
 def window_dialogue(
@@ -499,6 +531,8 @@ def pad_time(tensor: torch.Tensor, sequence_length: int, value: float = 0.0) -> 
 
 def pad_target(name: str, tensor: torch.Tensor, sequence_length: int) -> torch.Tensor:
     if name == "valence_arousal":
+        return pad_time(tensor, sequence_length, value=0.0)
+    if name == "horizon_mask":
         return pad_time(tensor, sequence_length, value=0.0)
     out = torch.full((sequence_length, *tensor.shape[1:]), TURN_IGNORE_INDEX, dtype=tensor.dtype)
     out[: tensor.shape[0]] = tensor

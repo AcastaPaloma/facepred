@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pandas as pd
 import torch
 
 from facepred.data import (
@@ -9,6 +10,8 @@ from facepred.data import (
     save_cache_shard,
     write_cache_manifest,
 )
+from scripts.prepare_meld_audio_cache import extract_causal_audio_features
+from scripts.prepare_meld_cache import build_step_targets
 
 
 def test_cached_sequence_dataset_round_trip(tmp_path) -> None:
@@ -49,3 +52,36 @@ def test_cached_sequence_dataset_round_trip(tmp_path) -> None:
     assert batch["targets"]["valence_arousal"].shape == (2, 4, 2)
     assert batch["mask"].dtype == torch.bool
     assert batch["metadata"][0]["id"] == "a"
+
+
+def test_future_targets_are_shifted_and_masked() -> None:
+    projected = pd.DataFrame(
+        {
+            "turn_taking": [0, 1, 2, 3],
+            "end_of_turn": [0, 1, 2, 3],
+            "dialog_act": [0, 1, 2, 3],
+            "emotion": [0, 1, 2, 3],
+            "valence": [0.0, 0.1, 0.2, 0.3],
+            "arousal": [0.0, 0.1, 0.2, 0.3],
+        }
+    )
+
+    targets = build_step_targets(projected, horizon_steps=[1, 3])
+
+    assert targets["turn_taking"].tolist() == [[1, 3], [2, -100], [3, -100], [-100, -100]]
+    assert targets["horizon_mask"].tolist() == [
+        [True, True],
+        [True, False],
+        [True, False],
+        [False, False],
+    ]
+
+
+def test_causal_audio_features_have_model_contract() -> None:
+    waveform = torch.sin(torch.linspace(0.0, 100.0, 1600))
+    audio, vad, quality = extract_causal_audio_features(waveform, num_frames=4)
+
+    assert audio.shape == (4, 25)
+    assert vad.shape == (4, 3)
+    assert quality.shape == (4, 4)
+    assert torch.isfinite(audio).all()

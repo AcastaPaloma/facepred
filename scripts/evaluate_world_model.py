@@ -18,7 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 from facepred.data import make_cached_dataloader
 from facepred.engine.trainer import load_project_config
 from facepred.models import FacePredLoss, FacePredWorldModel
-from scripts.train_world_model import MetricAccumulator, move_training_batch, world_model_metrics
+from scripts.train_world_model import MetricAccumulator, WorldMetricAccumulator, move_training_batch
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,7 +53,7 @@ def main() -> int:
         pin_memory=device.type == "cuda",
     )
 
-    metrics = evaluate(
+    metrics, report = evaluate(
         model=model,
         loader=loader,
         loss_fn=loss_fn,
@@ -65,6 +65,7 @@ def main() -> int:
         "split": args.split,
         "num_batches": min(len(loader), args.max_batches) if args.max_batches else len(loader),
         "metrics": metrics,
+        "confusion_matrices": report["confusion_matrices"],
     }
     if args.output:
         output = Path(args.output)
@@ -83,19 +84,22 @@ def evaluate(
     loss_fn: FacePredLoss,
     device: torch.device,
     max_batches: int | None,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], dict[str, Any]]:
     model.eval()
     accumulator = MetricAccumulator()
+    world_accumulator = WorldMetricAccumulator()
     for batch_idx, batch in enumerate(loader):
         if max_batches is not None and batch_idx >= max_batches:
             break
         features, targets = move_training_batch(batch, device)
         outputs = model(features)
         loss_output = loss_fn(outputs, targets)
-        metrics = loss_output.metrics()
-        metrics.update(world_model_metrics(outputs, targets))
-        accumulator.update(metrics)
-    return accumulator.mean()
+        accumulator.update(loss_output.metrics())
+        world_accumulator.update(outputs, targets)
+    report = world_accumulator.report()
+    metrics = accumulator.mean()
+    metrics.update(report["metrics"])
+    return metrics, report
 
 
 def resolve_device(value: str) -> torch.device:

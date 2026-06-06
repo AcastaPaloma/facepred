@@ -1,5 +1,8 @@
 # Google Colab Training Runbook
 
+> This is the lightweight metadata-cache runbook. For real MELD media and the
+> current causal Colab Free campaign, use `docs/colab_free_real_training.md`.
+
 This runbook assumes real training happens on Colab while local development stays focused on tests, lint, and small smoke commands.
 
 ## Drive Layout

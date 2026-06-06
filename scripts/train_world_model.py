@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import math
+import random
 import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +29,7 @@ from facepred.utils import seed_everything
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/config.yaml", help="Project config YAML.")
+    parser.add_argument("--model-config", default=None, help="Optional model YAML replacing config.model.")
     parser.add_argument("--cache-dir", required=True, help="Prepared cache directory.")
     parser.add_argument("--output-dir", required=True, help="Run directory for checkpoints and metrics.")
     parser.add_argument("--epochs", type=int, default=None, help="Override configured epoch count.")
@@ -36,9 +41,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-split", default="dev", help="Cache split for validation.")
     parser.add_argument("--num-workers", type=int, default=None, help="DataLoader workers.")
     parser.add_argument("--grad-accum", type=int, default=1, help="Gradient accumulation steps.")
+    parser.add_argument("--fusion-type", choices=["cross_attention", "concat", "perceiver"], default=None)
+    parser.add_argument("--dropout", type=float, default=None, help="Override encoder/fusion dropout.")
+    parser.add_argument(
+        "--turn-class-weighting",
+        choices=["none", "sqrt_inverse"],
+        default="sqrt_inverse",
+        help="Turn-label imbalance correction.",
+    )
+    parser.add_argument("--modality-dropout", type=float, default=None, help="Training-only modality dropout.")
     parser.add_argument("--amp", action="store_true", help="Use CUDA mixed precision when available.")
     parser.add_argument("--resume", default="auto", help="'auto', 'none', or path to checkpoint.")
     parser.add_argument("--save-every-steps", type=int, default=0, help="Also save periodic step checkpoints.")
+    parser.add_argument("--keep-step-checkpoints", type=int, default=3, help="Recent step checkpoints to retain.")
+    parser.add_argument("--early-stopping-patience", type=int, default=None, help="Stop after this many unimproved epochs.")
+    parser.add_argument("--allow-resume-mismatch", action="store_true", help="Allow cache/config mismatch on resume.")
     parser.add_argument("--max-train-batches", type=int, default=None, help="Debug limit.")
     parser.add_argument("--max-val-batches", type=int, default=None, help="Debug limit.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -48,7 +65,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     seed_everything(args.seed)
-    config = load_project_config(args.config)
+    config = apply_config_overrides(load_project_config(args.config), args)
     train_cfg = config["training"]
     model_cfg = config["model"]
 
@@ -64,10 +81,11 @@ def main() -> int:
     num_workers = int(args.num_workers if args.num_workers is not None else train_cfg.get("dataloader", {}).get("num_workers", 0))
     pin_memory = device.type == "cuda"
 
-    train_loader = make_cached_dataloader(
+    reference_train_loader = make_cached_dataloader(
         args.cache_dir,
         args.train_split,
         batch_size=batch_size,
+        shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=False,
@@ -85,7 +103,15 @@ def main() -> int:
         )
 
     model = FacePredWorldModel.from_config(model_cfg).to(device)
-    loss_fn = FacePredLoss(train_cfg.get("loss_weights", {}))
+    turn_class_weights = compute_turn_class_weights(
+        reference_train_loader,
+        num_classes=int(model_cfg.get("heads", {}).get("turn_taking", {}).get("num_classes", 4)),
+        mode=args.turn_class_weighting,
+    )
+    loss_fn = FacePredLoss(
+        train_cfg.get("loss_weights", {}),
+        turn_class_weights=turn_class_weights,
+    )
     optimizer_cfg = train_cfg.get("optimizer", {})
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -93,26 +119,49 @@ def main() -> int:
         weight_decay=float(args.weight_decay if args.weight_decay is not None else optimizer_cfg.get("weight_decay", 0.01)),
         betas=tuple(float(value) for value in optimizer_cfg.get("betas", [0.9, 0.999])),
     )
-    total_steps = max(1, math.ceil(len(train_loader) / max(1, args.grad_accum)) * epochs)
+    total_steps = max(1, math.ceil(len(reference_train_loader) / max(1, args.grad_accum)) * epochs)
     scheduler = make_scheduler(optimizer, train_cfg.get("scheduler", {}), total_steps)
     use_amp = bool(args.amp and device.type == "cuda")
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    config_fingerprint = stable_fingerprint(config)
+    cache_fingerprint = stable_fingerprint(manifest_fingerprint_payload(manifest))
+    early_stopping_patience = int(
+        args.early_stopping_patience
+        if args.early_stopping_patience is not None
+        else train_cfg.get("trainer", {}).get("early_stopping", {}).get("patience", 10)
+    )
+    modality_dropout = float(
+        args.modality_dropout
+        if args.modality_dropout is not None
+        else train_cfg.get("augmentation", {}).get("modality_dropout", 0.0)
+    )
 
     start_epoch = 0
+    start_batch_idx = 0
     global_step = 0
     best_score = -float("inf")
+    bad_epochs = 0
     resume_path = resolve_resume_path(args.resume, checkpoint_dir)
     if resume_path is not None:
         checkpoint = torch.load(resume_path, map_location=device)
+        validate_resume_checkpoint(
+            checkpoint,
+            config_fingerprint=config_fingerprint,
+            cache_fingerprint=cache_fingerprint,
+            allow_mismatch=args.allow_resume_mismatch,
+        )
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if checkpoint.get("scheduler_state_dict") is not None:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         if checkpoint.get("scaler_state_dict") is not None:
             scaler.load_state_dict(checkpoint["scaler_state_dict"])
-        start_epoch = int(checkpoint.get("epoch", -1)) + 1
+        restore_rng_state(checkpoint.get("rng_state"))
+        start_epoch = int(checkpoint.get("resume_epoch", checkpoint.get("epoch", -1) + 1))
+        start_batch_idx = int(checkpoint.get("resume_batch_idx", 0))
         global_step = int(checkpoint.get("global_step", 0))
         best_score = float(checkpoint.get("best_score", best_score))
+        bad_epochs = int(checkpoint.get("bad_epochs", 0))
 
     write_run_metadata(output_dir, args, config, manifest, device)
     print(
@@ -121,9 +170,12 @@ def main() -> int:
                 "device": str(device),
                 "epochs": epochs,
                 "start_epoch": start_epoch,
-                "train_batches": len(train_loader),
+                "start_batch_idx": start_batch_idx,
+                "train_batches": len(reference_train_loader),
                 "val_batches": len(val_loader) if val_loader is not None else 0,
                 "amp": use_amp,
+                "modality_dropout": modality_dropout,
+                "turn_class_weights": turn_class_weights.tolist() if turn_class_weights is not None else None,
                 "resume": str(resume_path) if resume_path else None,
                 "output_dir": str(output_dir),
             },
@@ -131,8 +183,21 @@ def main() -> int:
             sort_keys=True,
         )
     )
+    if early_stopping_patience > 0 and bad_epochs >= early_stopping_patience:
+        print(json.dumps({"early_stopping": True, "resume_without_additional_epochs": True}))
+        return 0
 
     for epoch in range(start_epoch, epochs):
+        train_loader = make_cached_dataloader(
+            args.cache_dir,
+            args.train_split,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=False,
+            generator=torch.Generator().manual_seed(args.seed + epoch),
+        )
         train_metrics, global_step = train_one_epoch(
             model=model,
             loader=train_loader,
@@ -148,14 +213,22 @@ def main() -> int:
             max_batches=args.max_train_batches,
             checkpoint_dir=checkpoint_dir,
             save_every_steps=args.save_every_steps,
-            checkpoint_payload_factory=lambda epoch_value, step_value, best_score_value=best_score: checkpoint_payload(
+            keep_step_checkpoints=args.keep_step_checkpoints,
+            start_batch_idx=start_batch_idx if epoch == start_epoch else 0,
+            modality_dropout=modality_dropout,
+            checkpoint_payload_factory=lambda epoch_value, step_value, next_batch_value, best_score_value=best_score, bad_epochs_value=bad_epochs: checkpoint_payload(
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
                 scaler=scaler,
                 epoch=epoch_value,
+                resume_epoch=epoch_value,
+                resume_batch_idx=next_batch_value,
                 global_step=step_value,
                 best_score=best_score_value,
+                bad_epochs=bad_epochs_value,
+                config_fingerprint=config_fingerprint,
+                cache_fingerprint=cache_fingerprint,
                 config=config,
                 args=args,
             ),
@@ -175,6 +248,9 @@ def main() -> int:
         is_best = score > best_score
         if is_best:
             best_score = score
+            bad_epochs = 0
+        else:
+            bad_epochs += 1
 
         epoch_record = {
             "epoch": epoch,
@@ -182,6 +258,7 @@ def main() -> int:
             "train": train_metrics,
             "val": val_metrics,
             "best_score": best_score,
+            "bad_epochs": bad_epochs,
         }
         append_jsonl(metrics_path, epoch_record)
         save_checkpoint(
@@ -192,8 +269,13 @@ def main() -> int:
                 scheduler=scheduler,
                 scaler=scaler,
                 epoch=epoch,
+                resume_epoch=epoch + 1,
+                resume_batch_idx=0,
                 global_step=global_step,
                 best_score=best_score,
+                bad_epochs=bad_epochs,
+                config_fingerprint=config_fingerprint,
+                cache_fingerprint=cache_fingerprint,
                 config=config,
                 args=args,
             ),
@@ -207,13 +289,21 @@ def main() -> int:
                     scheduler=scheduler,
                     scaler=scaler,
                     epoch=epoch,
+                    resume_epoch=epoch + 1,
+                    resume_batch_idx=0,
                     global_step=global_step,
                     best_score=best_score,
+                    bad_epochs=bad_epochs,
+                    config_fingerprint=config_fingerprint,
+                    cache_fingerprint=cache_fingerprint,
                     config=config,
                     args=args,
                 ),
             )
         print(json.dumps(epoch_record, indent=2, sort_keys=True))
+        if early_stopping_patience > 0 and bad_epochs >= early_stopping_patience:
+            print(json.dumps({"early_stopping": True, "epoch": epoch, "patience": early_stopping_patience}))
+            break
 
     return 0
 
@@ -234,22 +324,30 @@ def train_one_epoch(
     max_batches: int | None,
     checkpoint_dir: Path,
     save_every_steps: int,
+    keep_step_checkpoints: int,
+    start_batch_idx: int,
+    modality_dropout: float,
     checkpoint_payload_factory: Any,
 ) -> tuple[dict[str, float], int]:
     model.train()
     optimizer.zero_grad(set_to_none=True)
     accumulator = MetricAccumulator()
 
+    loader_length = len(loader) if hasattr(loader, "__len__") else None
+    effective_batches = min(loader_length, max_batches) if loader_length is not None and max_batches else loader_length
     for batch_idx, batch in enumerate(limit_iter(loader, max_batches)):
+        if batch_idx < start_batch_idx:
+            continue
         features, targets = move_training_batch(batch, device)
+        features, modality_mask = apply_modality_dropout(features, modality_dropout)
         with torch.cuda.amp.autocast(enabled=use_amp):
-            outputs = model(features)
+            outputs = model(features, modality_mask=modality_mask)
             loss_output = loss_fn(outputs, targets)
             loss = loss_output.total / grad_accum
 
         scaler.scale(loss).backward()
         is_update = (batch_idx + 1) % grad_accum == 0
-        is_last = max_batches is not None and (batch_idx + 1) >= max_batches
+        is_last = effective_batches is not None and (batch_idx + 1) >= effective_batches
         if is_update or is_last:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -261,8 +359,9 @@ def train_one_epoch(
             if save_every_steps > 0 and global_step % save_every_steps == 0:
                 save_checkpoint(
                     checkpoint_dir / f"step_{global_step:08d}.pt",
-                    checkpoint_payload_factory(epoch, global_step),
+                    checkpoint_payload_factory(epoch, global_step, batch_idx + 1),
                 )
+                prune_step_checkpoints(checkpoint_dir, keep_step_checkpoints)
 
         metrics = loss_output.metrics()
         metrics.update(world_model_metrics(outputs, targets))
@@ -286,15 +385,18 @@ def evaluate(
 ) -> dict[str, float]:
     model.eval()
     accumulator = MetricAccumulator()
+    world_accumulator = WorldMetricAccumulator()
     for batch in limit_iter(loader, max_batches):
         features, targets = move_training_batch(batch, device)
         with torch.cuda.amp.autocast(enabled=use_amp):
             outputs = model(features)
             loss_output = loss_fn(outputs, targets)
         metrics = loss_output.metrics()
-        metrics.update(world_model_metrics(outputs, targets))
         accumulator.update(metrics)
-    return accumulator.mean()
+        world_accumulator.update(outputs, targets)
+    result = accumulator.mean()
+    result.update(world_accumulator.metrics())
+    return result
 
 
 def move_training_batch(
@@ -320,33 +422,79 @@ def world_model_metrics(
     metrics: dict[str, float] = {}
     mask = targets.get("mask")
     if "turn_taking_logits" in outputs and "turn_taking" in targets:
-        logits = outputs["turn_taking_logits"][..., 0, :]
         labels = targets["turn_taking"]
-        valid = labels != -100
-        if mask is not None:
-            valid &= mask
-        metrics["turn_accuracy"] = masked_accuracy(logits, labels, valid)
-        metrics["turn_macro_f1"] = masked_macro_f1(logits, labels, valid, num_classes=logits.shape[-1])
+        scores = []
+        accuracies = []
+        for horizon_idx in range(outputs["turn_taking_logits"].shape[-2]):
+            logits = outputs["turn_taking_logits"][..., horizon_idx, :]
+            horizon_labels = labels_for_horizon(labels, horizon_idx)
+            valid = valid_for_horizon(horizon_labels, targets, mask, horizon_idx)
+            accuracy = masked_accuracy(logits, horizon_labels, valid)
+            score = masked_macro_f1(logits, horizon_labels, valid, num_classes=logits.shape[-1])
+            metrics[f"turn_accuracy/h{horizon_idx}"] = accuracy
+            metrics[f"turn_macro_f1/h{horizon_idx}"] = score
+            accuracies.append(accuracy)
+            scores.append(score)
+        metrics["turn_accuracy_mean"] = float(sum(accuracies) / max(1, len(accuracies)))
+        metrics["turn_macro_f1_mean"] = float(sum(scores) / max(1, len(scores)))
     if "turn_taking_entropy" in outputs:
-        entropy = outputs["turn_taking_entropy"][..., 0]
-        if mask is not None and mask.any():
-            entropy = entropy[mask]
-        metrics["turn_entropy"] = float(entropy.mean().detach().cpu()) if entropy.numel() else 0.0
+        entropy_scores = []
+        for horizon_idx in range(outputs["turn_taking_entropy"].shape[-1]):
+            entropy = outputs["turn_taking_entropy"][..., horizon_idx]
+            valid = valid_for_horizon(
+                labels_for_horizon(targets["turn_taking"], horizon_idx),
+                targets,
+                mask,
+                horizon_idx,
+            )
+            value = float(entropy[valid].mean().detach().cpu()) if valid.any() else 0.0
+            metrics[f"turn_entropy/h{horizon_idx}"] = value
+            entropy_scores.append(value)
+        metrics["turn_entropy_mean"] = float(sum(entropy_scores) / max(1, len(entropy_scores)))
     if "dialog_act_logits" in outputs and "dialog_act" in targets:
-        logits = outputs["dialog_act_logits"][..., 0, :]
-        labels = targets["dialog_act"]
-        valid = labels != -100
-        if mask is not None:
-            valid &= mask
-        metrics["dialog_act_accuracy"] = masked_accuracy(logits, labels, valid)
+        metrics["dialog_act_accuracy_mean"] = mean_horizon_accuracy(
+            outputs["dialog_act_logits"], targets["dialog_act"], targets, mask
+        )
     if "emotion_logits" in outputs and "emotion" in targets:
-        logits = outputs["emotion_logits"][..., 0, :]
-        labels = targets["emotion"]
-        valid = labels != -100
-        if mask is not None:
-            valid &= mask
-        metrics["emotion_accuracy"] = masked_accuracy(logits, labels, valid)
+        metrics["emotion_accuracy_mean"] = mean_horizon_accuracy(
+            outputs["emotion_logits"], targets["emotion"], targets, mask
+        )
     return metrics
+
+
+def labels_for_horizon(labels: torch.Tensor, horizon_idx: int) -> torch.Tensor:
+    if labels.ndim >= 3:
+        return labels[..., horizon_idx]
+    return labels
+
+
+def valid_for_horizon(
+    labels: torch.Tensor,
+    targets: Mapping[str, torch.Tensor],
+    mask: torch.Tensor | None,
+    horizon_idx: int,
+) -> torch.Tensor:
+    valid = labels != -100
+    if mask is not None:
+        valid &= mask
+    horizon_mask = targets.get("horizon_mask")
+    if horizon_mask is not None:
+        valid &= labels_for_horizon(horizon_mask, horizon_idx).bool()
+    return valid
+
+
+def mean_horizon_accuracy(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    targets: Mapping[str, torch.Tensor],
+    mask: torch.Tensor | None,
+) -> float:
+    scores = []
+    for horizon_idx in range(logits.shape[-2]):
+        horizon_labels = labels_for_horizon(labels, horizon_idx)
+        valid = valid_for_horizon(horizon_labels, targets, mask, horizon_idx)
+        scores.append(masked_accuracy(logits[..., horizon_idx, :], horizon_labels, valid))
+    return float(sum(scores) / max(1, len(scores)))
 
 
 def masked_accuracy(logits: torch.Tensor, labels: torch.Tensor, valid: torch.Tensor) -> float:
@@ -415,8 +563,9 @@ def resolve_resume_path(value: str, checkpoint_dir: Path) -> Path | None:
     if value.lower() in {"none", "false", "no"}:
         return None
     if value == "auto":
-        path = checkpoint_dir / "last.pt"
-        return path if path.exists() else None
+        candidates = [checkpoint_dir / "last.pt", *checkpoint_dir.glob("step_*.pt")]
+        existing = [path for path in candidates if path.exists()]
+        return max(existing, key=lambda path: path.stat().st_mtime) if existing else None
     path = Path(value)
     return path if path.exists() else None
 
@@ -428,15 +577,26 @@ def checkpoint_payload(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     scaler: torch.cuda.amp.GradScaler,
     epoch: int,
+    resume_epoch: int,
+    resume_batch_idx: int,
     global_step: int,
     best_score: float,
+    bad_epochs: int,
+    config_fingerprint: str,
+    cache_fingerprint: str,
     config: Mapping[str, Any],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     return {
         "epoch": epoch,
+        "resume_epoch": resume_epoch,
+        "resume_batch_idx": resume_batch_idx,
         "global_step": global_step,
         "best_score": best_score,
+        "bad_epochs": bad_epochs,
+        "config_fingerprint": config_fingerprint,
+        "cache_fingerprint": cache_fingerprint,
+        "rng_state": capture_rng_state(),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
@@ -488,11 +648,138 @@ def append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
 def select_best_score(val_metrics: Mapping[str, float]) -> float:
     if not val_metrics:
         return -float("inf")
-    if "turn_macro_f1" in val_metrics:
-        return float(val_metrics["turn_macro_f1"])
+    if "turn_macro_f1_mean" in val_metrics:
+        return float(val_metrics["turn_macro_f1_mean"])
     if "total" in val_metrics:
         return -float(val_metrics["total"])
     return -float(val_metrics.get("loss/total", float("inf")))
+
+
+def apply_config_overrides(config: Mapping[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    result = copy.deepcopy(dict(config))
+    if args.model_config:
+        try:
+            import yaml
+        except ImportError as exc:
+            raise ImportError("PyYAML is required for --model-config") from exc
+        with Path(args.model_config).open("r", encoding="utf-8") as handle:
+            result["model"] = yaml.safe_load(handle) or {}
+    if args.fusion_type:
+        result["model"]["fusion"]["type"] = args.fusion_type
+    if args.dropout is not None:
+        result["model"]["fusion"]["dropout"] = float(args.dropout)
+        for encoder in result["model"].get("encoders", {}).values():
+            if isinstance(encoder, dict) and "dropout" in encoder:
+                encoder["dropout"] = float(args.dropout)
+    return result
+
+
+def compute_turn_class_weights(
+    loader: Iterable[Mapping[str, Any]],
+    *,
+    num_classes: int,
+    mode: str,
+) -> torch.Tensor | None:
+    if mode == "none":
+        return None
+    counts = torch.zeros(num_classes, dtype=torch.float64)
+    for batch in loader:
+        labels = batch["targets"]["turn_taking"].reshape(-1)
+        valid = labels != -100
+        counts += torch.bincount(labels[valid], minlength=num_classes).double()
+    weights = counts.sum().clamp_min(1.0).sqrt() / counts.clamp_min(1.0).sqrt()
+    return (weights / weights.mean().clamp_min(1.0e-12)).float()
+
+
+def apply_modality_dropout(
+    features: Mapping[str, torch.Tensor],
+    probability: float,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor] | None]:
+    if probability <= 0.0:
+        return dict(features), None
+    output = {name: tensor for name, tensor in features.items()}
+    droppable = [name for name in output if name != "quality"]
+    if not droppable:
+        return output, None
+    batch, steps = next(iter(output.values())).shape[:2]
+    masks = {
+        name: torch.ones(batch, steps, dtype=torch.bool, device=next(iter(output.values())).device)
+        for name in output
+    }
+    keep_matrix = torch.rand(batch, len(droppable), device=next(iter(output.values())).device) >= probability
+    none_kept = ~keep_matrix.any(dim=-1)
+    if none_kept.any():
+        keep_matrix[none_kept, 0] = True
+    for idx, name in enumerate(droppable):
+        keep = keep_matrix[:, idx].view(batch, 1, 1)
+        output[name] = output[name] * keep
+        masks[name] = keep_matrix[:, idx].view(batch, 1).expand(batch, steps)
+    return output, masks
+
+
+def stable_fingerprint(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def manifest_fingerprint_payload(manifest: CacheManifest) -> dict[str, Any]:
+    return {
+        "version": manifest.version,
+        "modalities": manifest.modalities,
+        "sequence_length": manifest.sequence_length,
+        "step_duration_ms": manifest.step_duration_ms,
+        "splits": {
+            split: [(shard.path, shard.num_sequences) for shard in shards]
+            for split, shards in manifest.splits.items()
+        },
+        "metadata": manifest.metadata,
+    }
+
+
+def validate_resume_checkpoint(
+    checkpoint: Mapping[str, Any],
+    *,
+    config_fingerprint: str,
+    cache_fingerprint: str,
+    allow_mismatch: bool,
+) -> None:
+    mismatches = []
+    if checkpoint.get("config_fingerprint") not in {None, config_fingerprint}:
+        mismatches.append("config")
+    if checkpoint.get("cache_fingerprint") not in {None, cache_fingerprint}:
+        mismatches.append("cache")
+    if mismatches and not allow_mismatch:
+        raise ValueError(
+            f"Refusing to resume with mismatched {', '.join(mismatches)}. "
+            "Use --allow-resume-mismatch only when this is intentional."
+        )
+
+
+def capture_rng_state() -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_rng_state(state: Mapping[str, Any] | None) -> None:
+    if not state:
+        return
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
+    if torch.cuda.is_available() and "cuda" in state:
+        torch.cuda.set_rng_state_all(state["cuda"])
+
+
+def prune_step_checkpoints(checkpoint_dir: Path, keep: int) -> None:
+    paths = sorted(checkpoint_dir.glob("step_*.pt"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in paths[max(0, keep) :]:
+        path.unlink(missing_ok=True)
 
 
 def limit_iter(iterable: Iterable[Any], max_items: int | None) -> Iterable[Any]:
@@ -520,6 +807,116 @@ class MetricAccumulator:
             key: self.totals[key] / max(1, self.counts[key])
             for key in sorted(self.totals)
         }
+
+
+class WorldMetricAccumulator:
+    """Accumulate corpus-level classification metrics across batches."""
+
+    def __init__(self) -> None:
+        self.confusions: dict[str, list[torch.Tensor]] = {}
+        self.entropy_sum: list[float] = []
+        self.entropy_count: list[int] = []
+
+    def update(
+        self,
+        outputs: Mapping[str, torch.Tensor],
+        targets: Mapping[str, torch.Tensor],
+    ) -> None:
+        mask = targets.get("mask")
+        specs = (
+            ("turn", "turn_taking_logits", "turn_taking"),
+            ("dialog_act", "dialog_act_logits", "dialog_act"),
+            ("emotion", "emotion_logits", "emotion"),
+        )
+        for metric_name, output_name, target_name in specs:
+            if output_name not in outputs or target_name not in targets:
+                continue
+            logits = outputs[output_name]
+            labels = targets[target_name]
+            matrices = self.confusions.setdefault(
+                metric_name,
+                [
+                    torch.zeros(logits.shape[-1], logits.shape[-1], dtype=torch.long)
+                    for _ in range(logits.shape[-2])
+                ],
+            )
+            for horizon_idx in range(logits.shape[-2]):
+                horizon_labels = labels_for_horizon(labels, horizon_idx)
+                valid = valid_for_horizon(horizon_labels, targets, mask, horizon_idx)
+                predictions = logits[..., horizon_idx, :].argmax(dim=-1)
+                matrices[horizon_idx] += confusion_matrix(
+                    predictions[valid],
+                    horizon_labels[valid],
+                    logits.shape[-1],
+                )
+
+        if "turn_taking_entropy" in outputs and "turn_taking" in targets:
+            entropy = outputs["turn_taking_entropy"]
+            while len(self.entropy_sum) < entropy.shape[-1]:
+                self.entropy_sum.append(0.0)
+                self.entropy_count.append(0)
+            for horizon_idx in range(entropy.shape[-1]):
+                labels = labels_for_horizon(targets["turn_taking"], horizon_idx)
+                valid = valid_for_horizon(labels, targets, mask, horizon_idx)
+                self.entropy_sum[horizon_idx] += float(entropy[..., horizon_idx][valid].sum().cpu())
+                self.entropy_count[horizon_idx] += int(valid.sum().cpu())
+
+    def metrics(self) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        turn_f1 = []
+        turn_accuracy = []
+        for name, matrices in self.confusions.items():
+            for horizon_idx, matrix in enumerate(matrices):
+                accuracy, macro_f1 = metrics_from_confusion(matrix)
+                metrics[f"{name}_accuracy/h{horizon_idx}"] = accuracy
+                metrics[f"{name}_macro_f1/h{horizon_idx}"] = macro_f1
+                if name == "turn":
+                    turn_accuracy.append(accuracy)
+                    turn_f1.append(macro_f1)
+                    for class_idx, support in enumerate(matrix.sum(dim=1).tolist()):
+                        metrics[f"turn_support/h{horizon_idx}/class{class_idx}"] = float(support)
+        if turn_accuracy:
+            metrics["turn_accuracy_mean"] = float(sum(turn_accuracy) / len(turn_accuracy))
+            metrics["turn_macro_f1_mean"] = float(sum(turn_f1) / len(turn_f1))
+        for horizon_idx, total in enumerate(self.entropy_sum):
+            metrics[f"turn_entropy/h{horizon_idx}"] = total / max(1, self.entropy_count[horizon_idx])
+        if self.entropy_sum:
+            metrics["turn_entropy_mean"] = float(
+                sum(metrics[f"turn_entropy/h{idx}"] for idx in range(len(self.entropy_sum)))
+                / len(self.entropy_sum)
+            )
+        return metrics
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "metrics": self.metrics(),
+            "confusion_matrices": {
+                name: [matrix.tolist() for matrix in matrices]
+                for name, matrices in self.confusions.items()
+            },
+        }
+
+
+def confusion_matrix(
+    predictions: torch.Tensor,
+    labels: torch.Tensor,
+    num_classes: int,
+) -> torch.Tensor:
+    if labels.numel() == 0:
+        return torch.zeros(num_classes, num_classes, dtype=torch.long)
+    indices = labels.detach().cpu().long() * num_classes + predictions.detach().cpu().long()
+    return torch.bincount(indices, minlength=num_classes * num_classes).reshape(num_classes, num_classes)
+
+
+def metrics_from_confusion(matrix: torch.Tensor) -> tuple[float, float]:
+    matrix = matrix.float()
+    total = matrix.sum().clamp_min(1.0)
+    accuracy = float(matrix.diag().sum() / total)
+    tp = matrix.diag()
+    fp = matrix.sum(dim=0) - tp
+    fn = matrix.sum(dim=1) - tp
+    f1 = 2 * tp / (2 * tp + fp + fn).clamp_min(1.0)
+    return accuracy, float(f1.mean())
 
 
 if __name__ == "__main__":

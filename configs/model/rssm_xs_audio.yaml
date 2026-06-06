@@ -1,0 +1,50 @@
+# Causal real-audio baseline for the first MELD training campaign.
+
+rssm:
+  gru_hidden: 128
+  latent_type: categorical
+  categorical_classes: 16
+  categorical_dims: 8
+  gaussian_dim: 32
+
+step_duration_ms: 100
+prediction_horizons_ms: [200, 1000]
+
+encoders:
+  audio_prosody:
+    input_dim: 25
+    hidden_dim: 64
+    output_dim: 64
+    num_layers: 2
+    dropout: 0.1
+  vad:
+    input_dim: 3
+    output_dim: 16
+  quality:
+    input_dim: 4
+    output_dim: 16
+
+fusion:
+  type: cross_attention
+  embed_dim: 128
+  num_heads: 4
+  dropout: 0.1
+  reliability: learned
+
+heads:
+  turn_taking:
+    num_classes: 4
+    hidden_dim: 128
+  end_of_turn:
+    num_buckets: 10
+    hidden_dim: 128
+  dialog_act:
+    num_classes: 13
+    hidden_dim: 128
+  affect:
+    type: both
+    num_emotions: 7
+    hidden_dim: 64
+  uncertainty:
+    method: entropy
+    hidden_dim: 64

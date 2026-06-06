@@ -235,6 +235,7 @@ def make_cached_dataloader(
     pin_memory: bool = False,
     drop_last: bool = False,
     load_to_memory: bool = True,
+    generator: torch.Generator | None = None,
 ) -> DataLoader:
     """Build a DataLoader for one cached split."""
     dataset = CachedSequenceDataset(cache_dir, split=split, load_to_memory=load_to_memory)
@@ -248,6 +249,7 @@ def make_cached_dataloader(
         pin_memory=pin_memory,
         drop_last=drop_last,
         collate_fn=collate_cached_sequences,
+        generator=generator,
     )
 
 

@@ -1,5 +1,10 @@
 # FacePred Iteration 0 Technical Report
 
+> Historical snapshot: this report describes the iteration-0 scaffold. The
+> current real-training release candidate is documented in
+> `docs/colab_free_real_training.md` and the post-iteration update at the end of
+> this report.
+
 ## Executive Summary
 
 FacePred Iteration 0 is a validated code scaffold for a predictive multimodal interaction world model. The repository now has working package structure, configuration, lazy feature extraction interfaces, MELD-style data utilities, model components, synthetic training/evaluation scripts, inference/precompute scaffolds, and tests.
@@ -355,3 +360,17 @@ The fastest pushable milestone is:
 > Real MELD metadata + fixed-rate heuristic labels + cheap cached features + `FacePredWorldModel` training + checkpoint + evaluation report.
 
 That milestone is credible, demoable, and aligned with the architecture. It also sets up Colab for the expensive feature passes without forcing local hardware to do work it is bad at.
+
+## Post-Iteration-0 Campaign Update
+
+The first real causal campaign is now implemented:
+
+- `stage_meld_colab.py` downloads the official raw MELD archive and stages it locally.
+- `prepare_meld_audio_cache.py` decodes real MP4 audio and writes resumable dialogue progress.
+- Training targets are shifted to the configured 200 ms and 1000 ms futures.
+- The primary campaign excludes ground-truth transcript input to prevent future leakage.
+- `train_world_model.py` resumes from the newest step or epoch checkpoint, including batch position.
+- `tune_and_train_colab.py` performs dev-only successive halving and continues the winner.
+- Final evaluation includes per-horizon corpus metrics and confusion matrices.
+
+See `docs/colab_free_real_training.md` for the release-candidate runbook.

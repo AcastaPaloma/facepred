@@ -11,7 +11,7 @@ The architecture registry lives in [`.references/architectural_decisions.md`](.r
 - MELD-style dataset normalization, synthetic fixtures, label derivation, synchronization, and augmentations
 - A PyTorch world-model stack under [`facepred/models/`](facepred/models/)
 - Lightweight training, evaluation, precompute gating, and inference scaffolds
-- Synthetic smoke scripts under [`scripts/`](scripts/)
+- Synthetic smoke scripts and a real causal MELD audio campaign under [`scripts/`](scripts/)
 
 Heavy media dependencies such as MediaPipe, openSMILE, Whisper, pyannote, and transformers are imported lazily. You can run the synthetic smoke path before installing every optional backend.
 
@@ -64,9 +64,11 @@ Run the terminal demo:
 python scripts/demo.py
 ```
 
-## Iteration 0 Status
+## Current Status
 
-The current build is designed to prove tensor contracts and control flow on CPU. Real MELD media extraction, full training recipes, and calibrated latency experiments come after the synthetic path is stable.
+The iteration-0 tensor contracts remain available for CPU smoke testing. The
+repository now also includes a resumable real-MELD audio campaign for Colab
+Free. Visual extraction and calibrated latency experiments remain later steps.
 
 See [`task.md`](task.md) for the current build tracker.
 
@@ -76,3 +78,7 @@ For a fuller build log, codebase inventory, and training-readiness notes, see
 For the Colab cache/training workflow, see
 [`docs/colab_training.md`](docs/colab_training.md) and
 [`notebooks/facepred_colab_quickstart.ipynb`](notebooks/facepred_colab_quickstart.ipynb).
+
+For the first real, causal Colab Free campaign, use
+[`docs/colab_free_real_training.md`](docs/colab_free_real_training.md) and
+[`notebooks/facepred_colab_free_real_training.ipynb`](notebooks/facepred_colab_free_real_training.ipynb).

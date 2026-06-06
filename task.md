@@ -32,3 +32,14 @@
 - [x] Checkpoint/resume support (`last.pt`, `best.pt`, step checkpoints)
 - [x] Cached checkpoint evaluation script
 - [x] Colab runbook and quickstart notebook
+
+## Phase 6: First Real Causal Campaign
+- [x] Real MELD archive staging for Colab Free
+- [x] Resumable per-dialogue real-audio cache extraction
+- [x] Causal features with no transcript leakage
+- [x] Future-shifted 200 ms and 1000 ms targets
+- [x] Class-balanced loss and training modality dropout
+- [x] Intra-epoch newest-checkpoint recovery
+- [x] Dev-only successive-halving tuning and 75-epoch winner continuation
+- [x] Per-horizon corpus metrics and final test confusion matrices
+- [x] Colab Free real-training notebook and runbook

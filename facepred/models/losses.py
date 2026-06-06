@@ -30,6 +30,7 @@ class FacePredLoss(nn.Module):
         self,
         weights: Mapping[str, float] | None = None,
         label_smoothing: float = 0.0,
+        turn_class_weights: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.weights = {
@@ -43,6 +44,7 @@ class FacePredLoss(nn.Module):
         if weights:
             self.weights.update({k: float(v) for k, v in weights.items()})
         self.label_smoothing = label_smoothing
+        self.register_buffer("turn_class_weights", turn_class_weights)
 
     def forward(
         self,
@@ -67,6 +69,7 @@ class FacePredLoss(nn.Module):
             pred_key="turn_taking_logits",
             target_keys=("turn_taking", "turn_labels"),
             component="turn_taking",
+            class_weights=self.turn_class_weights,
         )
         total = self._add_ce(
             predictions,
@@ -100,7 +103,11 @@ class FacePredLoss(nn.Module):
             pred = predictions["valence_arousal"]
             target = targets["valence_arousal"].to(device=pred.device, dtype=pred.dtype)
             target = match_prediction_shape(pred, target)
-            va_loss = masked_mse_loss(pred, target, targets.get("mask"))
+            va_loss = masked_mse_loss(
+                pred,
+                target,
+                targets.get("horizon_mask", targets.get("mask")),
+            )
             components["valence_arousal"] = va_loss
             total = total + self.weights["affect"] * va_loss
 
@@ -125,6 +132,7 @@ class FacePredLoss(nn.Module):
         pred_key: str,
         target_keys: tuple[str, ...],
         component: str,
+        class_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if pred_key not in predictions:
             return total
@@ -132,7 +140,12 @@ class FacePredLoss(nn.Module):
         if target is None:
             return total
         logits = predictions[pred_key]
-        loss = sequence_cross_entropy(logits, target, label_smoothing=self.label_smoothing)
+        loss = sequence_cross_entropy(
+            logits,
+            target,
+            label_smoothing=self.label_smoothing,
+            class_weights=class_weights,
+        )
         components[component] = loss
         return total + self.weights[component] * loss
 
@@ -150,6 +163,7 @@ def sequence_cross_entropy(
     targets: torch.Tensor,
     ignore_index: int = -100,
     label_smoothing: float = 0.0,
+    class_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Cross entropy for ``[..., classes]`` logits and matching integer targets."""
     targets = targets.to(device=logits.device, dtype=torch.long)
@@ -159,6 +173,7 @@ def sequence_cross_entropy(
         targets.reshape(-1),
         ignore_index=ignore_index,
         label_smoothing=label_smoothing,
+        weight=class_weights.to(logits.device) if class_weights is not None else None,
     )
 
 

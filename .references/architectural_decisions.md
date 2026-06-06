@@ -2,6 +2,28 @@
 
 > Every design choice in this project is documented here. If you're contributing or experimenting, this is your guide to what knobs you can turn and what happens when you do.
 
+## Campaign 1 Amendment: Causal Real-Audio Baseline
+
+The first serious Colab training campaign is an audio-first baseline using real
+MELD media. This amendment takes precedence where the older iteration-0 notes
+were ambiguous.
+
+| Decision | Campaign 1 choice |
+|---|---|
+| Input modalities | Real causal audio statistics, energy VAD, and quality signals |
+| Excluded primary input | Ground-truth MELD transcript, because the complete utterance leaks future information |
+| Target semantics | Labels at `t + 200ms` and `t + 1000ms`, not duplicated current-timestep labels |
+| Feature causality | A feature at timestep `t` may only summarize the audio frame ending at `t` or earlier |
+| Model selection | Dev split only; test split is evaluated once after selection |
+| Tuning | Successive halving over XS/S and `1e-4`/`3e-4` learning rates |
+| Main run | Maximum 75 epochs with patience-12 early stopping |
+| Recovery | Persistent Drive cache/progress/checkpoints; newest valid step or epoch checkpoint resumes |
+| Next thesis ablation | Compare real audio-only against real audio plus visual features |
+
+The 25-dimensional causal audio-statistics representation is a practical first
+baseline for Colab Free. eGeMAPS, wav2vec2, and MediaPipe remain planned
+feature-cache ablations; they must also obey the causal feature policy.
+
 ---
 
 ## World Model Architecture
