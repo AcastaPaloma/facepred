@@ -153,6 +153,8 @@ python scripts/inspect_training_cache.py --cache-dir /content/facepred_cache --s
 ```
 
 Training reads the cache from local runtime disk and writes checkpoints to Drive.
+The inspection output must include a `yield` target and manifest target schema
+`earliest_event_safe_yield_v2`. If it does not, the wrong Drive cache was copied.
 
 ## 5. Tune Then Train
 

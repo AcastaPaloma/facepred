@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from facepred.data import make_cached_dataloader
+from facepred.data import make_cached_dataloader, validate_safe_yield_cache
 from scripts.train_world_model import binary_probability_metrics
 
 
@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    validate_safe_yield_cache(args.cache_dir, splits=(args.split,))
     loader = make_cached_dataloader(args.cache_dir, args.split, batch_size=64, shuffle=False)
     probabilities: list[list[torch.Tensor]] = []
     labels: list[list[torch.Tensor]] = []

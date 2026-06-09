@@ -11,6 +11,7 @@ from facepred.data import (
     collate_cached_sequences,
     event_balanced_sample_weights,
     save_cache_shard,
+    validate_safe_yield_cache,
     write_cache_manifest,
 )
 from scripts.prepare_meld_audio_cache import extract_causal_audio_features
@@ -112,6 +113,26 @@ def test_cache_v1_manifest_remains_loadable(tmp_path) -> None:
     )
 
     assert CacheManifest.load(tmp_path).version == 1
+
+
+def test_safe_yield_cache_validation_explains_missing_target(tmp_path) -> None:
+    save_cache_shard(
+        tmp_path / "dev" / "dev_0000.pt",
+        features={"vad": torch.ones(1, 4, 3)},
+        targets={"turn_taking": torch.zeros(1, 4, 2, dtype=torch.long)},
+        mask=torch.ones(1, 4, dtype=torch.bool),
+    )
+    write_cache_manifest(
+        tmp_path,
+        modalities=["vad"],
+        sequence_length=4,
+        step_duration_ms=100,
+        splits={"dev": [CacheShard(path="dev/dev_0000.pt", num_sequences=1)]},
+        metadata={"target_schema": "legacy"},
+    )
+
+    with pytest.raises(ValueError, match="missing targets.*yield"):
+        validate_safe_yield_cache(tmp_path, splits=("dev",))
 
 
 def test_event_balanced_weights_allocate_mass_by_window_group() -> None:

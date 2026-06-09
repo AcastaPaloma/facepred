@@ -23,6 +23,9 @@ from facepred.utils import load_trusted_torch_artifact
 
 CACHE_VERSION = 2
 SUPPORTED_CACHE_VERSIONS = (1, 2)
+SAFE_YIELD_TARGETS = frozenset(
+    {"turn_taking", "yield", "end_of_turn", "horizon_mask"}
+)
 
 
 @dataclass(frozen=True)
@@ -146,6 +149,55 @@ def load_cache_shard(path: str | Path, map_location: str | torch.device = "cpu")
     if missing:
         raise ValueError(f"Cache shard {path} is missing required keys: {missing}")
     return shard
+
+
+def validate_safe_yield_cache(
+    cache_dir: str | Path,
+    *,
+    splits: Sequence[str] = ("train", "dev"),
+) -> dict[str, Any]:
+    """Validate the corrected safe-yield cache contract before training."""
+
+    manifest = CacheManifest.load(cache_dir)
+    errors: list[str] = []
+    if manifest.version < 2:
+        errors.append(f"manifest version is {manifest.version}, expected at least 2")
+    target_schema = manifest.metadata.get("target_schema")
+    if target_schema != "earliest_event_safe_yield_v2":
+        errors.append(
+            f"target schema is {target_schema!r}, expected 'earliest_event_safe_yield_v2'"
+        )
+
+    targets_by_split: dict[str, list[str]] = {}
+    for split in splits:
+        if split not in manifest.splits:
+            errors.append(f"missing split {split!r}")
+            continue
+        paths = manifest.shard_paths(split)
+        if not paths:
+            errors.append(f"split {split!r} has no shards")
+            continue
+        shard = load_cache_shard(paths[0], map_location="cpu")
+        target_names = sorted(shard["targets"])
+        targets_by_split[split] = target_names
+        missing_targets = sorted(SAFE_YIELD_TARGETS - set(target_names))
+        if missing_targets:
+            errors.append(f"split {split!r} is missing targets {missing_targets}")
+
+    if errors:
+        details = "; ".join(errors)
+        raise ValueError(
+            f"{cache_dir} is not a corrected safe-yield cache: {details}. "
+            "Copy Drive cache/meld_audio_yield_v2 into the local cache directory, "
+            "or rebuild it with scripts/prepare_meld_audio_cache.py."
+        )
+    return {
+        "cache_dir": str(cache_dir),
+        "version": manifest.version,
+        "target_schema": target_schema,
+        "modalities": list(manifest.modalities),
+        "targets_by_split": targets_by_split,
+    }
 
 
 def save_cache_shard(

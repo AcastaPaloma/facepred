@@ -9,6 +9,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from facepred.data import validate_safe_yield_cache
+
 CANDIDATES: tuple[dict[str, Any], ...] = (
     {
         "name": "gru_s_concat_unweighted",
@@ -73,6 +79,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    cache_contract = validate_safe_yield_cache(args.cache_dir)
+    print(json.dumps({"safe_yield_cache_preflight": cache_contract}, indent=2, sort_keys=True))
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     silence_output = output_root / "silence_baseline.json"

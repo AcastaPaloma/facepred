@@ -21,6 +21,7 @@ from facepred.data.cached import (
     load_cache_shard,
     make_cached_dataloader,
     save_cache_shard,
+    validate_safe_yield_cache,
     write_cache_manifest,
 )
 from facepred.data.label_derivation import (
@@ -118,6 +119,7 @@ __all__ = [
     "normalize_meld_dataframe",
     "parse_time_seconds",
     "save_cache_shard",
+    "validate_safe_yield_cache",
     "temporal_shift",
     "write_cache_manifest",
 ]
