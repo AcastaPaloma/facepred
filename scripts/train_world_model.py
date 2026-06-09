@@ -45,11 +45,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout", type=float, default=None, help="Override encoder/fusion dropout.")
     parser.add_argument(
         "--turn-class-weighting",
-        choices=["none", "sqrt_inverse"],
-        default="sqrt_inverse",
+        choices=["none", "sqrt_inverse", "inverse"],
+        default="inverse",
         help="Turn-label imbalance correction.",
     )
+    parser.add_argument(
+        "--aux-class-weighting",
+        choices=["none", "sqrt_inverse", "inverse"],
+        default="sqrt_inverse",
+        help="Imbalance correction for end-of-turn, dialog-act, and emotion targets.",
+    )
+    parser.add_argument("--turn-focal-gamma", type=float, default=1.5, help="Focal exponent for turn loss.")
+    parser.add_argument("--turn-loss-weight", type=float, default=2.0, help="Primary turn-loss multiplier.")
     parser.add_argument("--modality-dropout", type=float, default=None, help="Training-only modality dropout.")
+    parser.add_argument(
+        "--schedule-epochs",
+        type=int,
+        default=None,
+        help="Epoch span used by the LR scheduler. Keep fixed across staged/resumed training.",
+    )
     parser.add_argument("--amp", action="store_true", help="Use CUDA mixed precision when available.")
     parser.add_argument("--resume", default="auto", help="'auto', 'none', or path to checkpoint.")
     parser.add_argument("--save-every-steps", type=int, default=0, help="Also save periodic step checkpoints.")
@@ -103,14 +117,16 @@ def main() -> int:
         )
 
     model = FacePredWorldModel.from_config(model_cfg).to(device)
-    turn_class_weights = compute_turn_class_weights(
+    class_weights = compute_class_weights(
         reference_train_loader,
-        num_classes=int(model_cfg.get("heads", {}).get("turn_taking", {}).get("num_classes", 4)),
-        mode=args.turn_class_weighting,
+        specs=classification_weight_specs(model_cfg, args),
     )
+    loss_weights = dict(train_cfg.get("loss_weights", {}))
+    loss_weights["turn_taking"] = float(args.turn_loss_weight)
     loss_fn = FacePredLoss(
-        train_cfg.get("loss_weights", {}),
-        turn_class_weights=turn_class_weights,
+        loss_weights,
+        class_weights=class_weights,
+        focal_gammas={"turn_taking": max(0.0, float(args.turn_focal_gamma))},
     )
     optimizer_cfg = train_cfg.get("optimizer", {})
     optimizer = torch.optim.AdamW(
@@ -119,11 +135,20 @@ def main() -> int:
         weight_decay=float(args.weight_decay if args.weight_decay is not None else optimizer_cfg.get("weight_decay", 0.01)),
         betas=tuple(float(value) for value in optimizer_cfg.get("betas", [0.9, 0.999])),
     )
-    total_steps = max(1, math.ceil(len(reference_train_loader) / max(1, args.grad_accum)) * epochs)
+    schedule_epochs = max(epochs, int(args.schedule_epochs or epochs))
+    total_steps = max(
+        1,
+        math.ceil(len(reference_train_loader) / max(1, args.grad_accum)) * schedule_epochs,
+    )
     scheduler = make_scheduler(optimizer, train_cfg.get("scheduler", {}), total_steps)
     use_amp = bool(args.amp and device.type == "cuda")
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-    config_fingerprint = stable_fingerprint(config)
+    scaler = make_grad_scaler(use_amp)
+    config_fingerprint = stable_fingerprint(
+        {
+            "config": config,
+            "training_semantics": training_semantics(args, schedule_epochs, batch_size),
+        }
+    )
     cache_fingerprint = stable_fingerprint(manifest_fingerprint_payload(manifest))
     early_stopping_patience = int(
         args.early_stopping_patience
@@ -169,13 +194,19 @@ def main() -> int:
             {
                 "device": str(device),
                 "epochs": epochs,
+                "schedule_epochs": schedule_epochs,
                 "start_epoch": start_epoch,
                 "start_batch_idx": start_batch_idx,
                 "train_batches": len(reference_train_loader),
                 "val_batches": len(val_loader) if val_loader is not None else 0,
                 "amp": use_amp,
                 "modality_dropout": modality_dropout,
-                "turn_class_weights": turn_class_weights.tolist() if turn_class_weights is not None else None,
+                "class_weights": {
+                    name: values.tolist()
+                    for name, values in class_weights.items()
+                },
+                "turn_focal_gamma": args.turn_focal_gamma,
+                "turn_loss_weight": args.turn_loss_weight,
                 "resume": str(resume_path) if resume_path else None,
                 "output_dir": str(output_dir),
             },
@@ -315,7 +346,7 @@ def train_one_epoch(
     loss_fn: FacePredLoss,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
-    scaler: torch.cuda.amp.GradScaler,
+    scaler: Any,
     device: torch.device,
     epoch: int,
     global_step: int,
@@ -340,7 +371,7 @@ def train_one_epoch(
             continue
         features, targets = move_training_batch(batch, device)
         features, modality_mask = apply_modality_dropout(features, modality_dropout)
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.autocast(device_type=device.type, enabled=use_amp):
             outputs = model(features, modality_mask=modality_mask)
             loss_output = loss_fn(outputs, targets)
             loss = loss_output.total / grad_accum
@@ -388,7 +419,7 @@ def evaluate(
     world_accumulator = WorldMetricAccumulator()
     for batch in limit_iter(loader, max_batches):
         features, targets = move_training_batch(batch, device)
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.autocast(device_type=device.type, enabled=use_amp):
             outputs = model(features)
             loss_output = loss_fn(outputs, targets)
         metrics = loss_output.metrics()
@@ -550,6 +581,15 @@ def make_scheduler(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+def make_grad_scaler(enabled: bool) -> Any:
+    """Use the current AMP API while remaining compatible with older PyTorch."""
+
+    scaler_type = getattr(torch.amp, "GradScaler", None)
+    if scaler_type is not None:
+        return scaler_type("cuda", enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
 def resolve_device(value: str) -> torch.device:
     if value == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -575,7 +615,7 @@ def checkpoint_payload(
     model: FacePredWorldModel,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
-    scaler: torch.cuda.amp.GradScaler,
+    scaler: Any,
     epoch: int,
     resume_epoch: int,
     resume_batch_idx: int,
@@ -674,21 +714,90 @@ def apply_config_overrides(config: Mapping[str, Any], args: argparse.Namespace) 
     return result
 
 
-def compute_turn_class_weights(
+def classification_weight_specs(
+    model_config: Mapping[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, tuple[int, str]]:
+    heads = model_config.get("heads", {})
+    return {
+        "turn_taking": (
+            int(heads.get("turn_taking", {}).get("num_classes", 4)),
+            args.turn_class_weighting,
+        ),
+        "end_of_turn": (
+            int(heads.get("end_of_turn", {}).get("num_buckets", 10)),
+            args.aux_class_weighting,
+        ),
+        "dialog_act": (
+            int(heads.get("dialog_act", {}).get("num_classes", 13)),
+            args.aux_class_weighting,
+        ),
+        "affect": (
+            int(heads.get("affect", {}).get("num_emotions", 7)),
+            args.aux_class_weighting,
+        ),
+    }
+
+
+def compute_class_weights(
     loader: Iterable[Mapping[str, Any]],
     *,
-    num_classes: int,
-    mode: str,
-) -> torch.Tensor | None:
-    if mode == "none":
-        return None
-    counts = torch.zeros(num_classes, dtype=torch.float64)
+    specs: Mapping[str, tuple[int, str]],
+) -> dict[str, torch.Tensor]:
+    target_keys = {
+        "turn_taking": "turn_taking",
+        "end_of_turn": "end_of_turn",
+        "dialog_act": "dialog_act",
+        "affect": "emotion",
+    }
+    counts = {
+        component: torch.zeros(num_classes, dtype=torch.float64)
+        for component, (num_classes, mode) in specs.items()
+        if mode != "none"
+    }
     for batch in loader:
-        labels = batch["targets"]["turn_taking"].reshape(-1)
-        valid = labels != -100
-        counts += torch.bincount(labels[valid], minlength=num_classes).double()
-    weights = counts.sum().clamp_min(1.0).sqrt() / counts.clamp_min(1.0).sqrt()
-    return (weights / weights.mean().clamp_min(1.0e-12)).float()
+        for component, component_counts in counts.items():
+            labels = batch["targets"][target_keys[component]].reshape(-1)
+            valid = labels != -100
+            component_counts += torch.bincount(
+                labels[valid],
+                minlength=component_counts.numel(),
+            ).double()
+
+    result: dict[str, torch.Tensor] = {}
+    for component, component_counts in counts.items():
+        mode = specs[component][1]
+        exponent = 0.5 if mode == "sqrt_inverse" else 1.0
+        present = component_counts > 0
+        weights = torch.zeros_like(component_counts)
+        weights[present] = (
+            component_counts.sum().clamp_min(1.0).pow(exponent)
+            / component_counts[present].pow(exponent)
+        )
+        weights[present] /= weights[present].mean().clamp_min(1.0e-12)
+        result[component] = weights.float()
+    return result
+
+
+def training_semantics(
+    args: argparse.Namespace,
+    schedule_epochs: int,
+    batch_size: int,
+) -> dict[str, Any]:
+    """Fingerprint settings that must remain stable when resuming a staged run."""
+
+    return {
+        "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "batch_size": batch_size,
+        "grad_accum": args.grad_accum,
+        "schedule_epochs": schedule_epochs,
+        "turn_class_weighting": args.turn_class_weighting,
+        "aux_class_weighting": args.aux_class_weighting,
+        "turn_focal_gamma": args.turn_focal_gamma,
+        "turn_loss_weight": args.turn_loss_weight,
+        "modality_dropout": args.modality_dropout,
+    }
 
 
 def apply_modality_dropout(
@@ -873,11 +982,53 @@ class WorldMetricAccumulator:
                 if name == "turn":
                     turn_accuracy.append(accuracy)
                     turn_f1.append(macro_f1)
-                    for class_idx, support in enumerate(matrix.sum(dim=1).tolist()):
-                        metrics[f"turn_support/h{horizon_idx}/class{class_idx}"] = float(support)
+                    support = matrix.sum(dim=1)
+                    predicted_support = matrix.sum(dim=0)
+                    true_positive = matrix.diag()
+                    recall = true_positive / support.clamp_min(1)
+                    precision = true_positive / predicted_support.clamp_min(1)
+                    class_f1 = 2 * precision * recall / (precision + recall).clamp_min(1.0e-12)
+                    majority_count = support.max() if support.numel() else torch.tensor(0)
+                    majority_f1 = 2 * majority_count / (support.sum() + majority_count).clamp_min(1)
+                    metrics[f"turn_active_classes/h{horizon_idx}"] = float(
+                        (predicted_support > 0).sum()
+                    )
+                    metrics[f"turn_majority_macro_f1/h{horizon_idx}"] = float(
+                        majority_f1 / max(1, matrix.shape[0])
+                    )
+                    metrics[f"turn_balanced_accuracy/h{horizon_idx}"] = float(recall.mean())
+                    for class_idx, class_support in enumerate(support.tolist()):
+                        metrics[f"turn_support/h{horizon_idx}/class{class_idx}"] = float(class_support)
+                        metrics[f"turn_pred_support/h{horizon_idx}/class{class_idx}"] = float(
+                            predicted_support[class_idx]
+                        )
+                        metrics[f"turn_recall/h{horizon_idx}/class{class_idx}"] = float(
+                            recall[class_idx]
+                        )
+                        metrics[f"turn_f1/h{horizon_idx}/class{class_idx}"] = float(
+                            class_f1[class_idx]
+                        )
         if turn_accuracy:
             metrics["turn_accuracy_mean"] = float(sum(turn_accuracy) / len(turn_accuracy))
             metrics["turn_macro_f1_mean"] = float(sum(turn_f1) / len(turn_f1))
+            metrics["turn_active_classes_mean"] = float(
+                sum(metrics[f"turn_active_classes/h{idx}"] for idx in range(len(turn_accuracy)))
+                / len(turn_accuracy)
+            )
+            metrics["turn_majority_macro_f1_mean"] = float(
+                sum(
+                    metrics[f"turn_majority_macro_f1/h{idx}"]
+                    for idx in range(len(turn_accuracy))
+                )
+                / len(turn_accuracy)
+            )
+            metrics["turn_balanced_accuracy_mean"] = float(
+                sum(
+                    metrics[f"turn_balanced_accuracy/h{idx}"]
+                    for idx in range(len(turn_accuracy))
+                )
+                / len(turn_accuracy)
+            )
         for horizon_idx, total in enumerate(self.entropy_sum):
             metrics[f"turn_entropy/h{horizon_idx}"] = total / max(1, self.entropy_count[horizon_idx])
         if self.entropy_sum:

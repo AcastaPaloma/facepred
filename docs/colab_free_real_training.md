@@ -31,7 +31,7 @@ MyDrive/facepred/
     train/*.pt
     dev/*.pt
     test/*.pt
-  runs/audio_campaign_v1/
+  runs/audio_campaign_v2/
     selection.json
     <candidate>/
       checkpoints/
@@ -145,16 +145,22 @@ Change the Colab runtime to GPU. Then rerun mount, clone/install, and:
 rm -rf /content/facepred_cache
 mkdir -p /content/facepred_cache
 rsync -a --exclude '.progress/' /content/drive/MyDrive/facepred/cache/meld_audio_causal_v1/ /content/facepred_cache/
+python scripts/inspect_training_cache.py --cache-dir /content/facepred_cache --split train
+python scripts/inspect_training_cache.py --cache-dir /content/facepred_cache --split dev
 ```
 
 Training reads the cache from local runtime disk and writes checkpoints to Drive.
 
 ## 5. Tune Then Train
 
+If you already ran the collapsed `audio_campaign_v1`, keep its artifacts for
+comparison but start this corrected run under `audio_campaign_v2`. Reuse the
+existing `meld_audio_causal_v1` cache; it does not need to be rebuilt.
+
 ```bash
 python scripts/tune_and_train_colab.py \
   --cache-dir /content/facepred_cache \
-  --output-root /content/drive/MyDrive/facepred/runs/audio_campaign_v1 \
+  --output-root /content/drive/MyDrive/facepred/runs/audio_campaign_v2 \
   --device cuda \
   --batch-size 32 \
   --stage1-epochs 5 \
@@ -179,13 +185,24 @@ The winner continues toward 75 epochs with early stopping.
 Rerunning the same command is the recovery procedure. Completed candidates and
 epochs are resumed rather than restarted.
 
+Campaign v2 corrects two issues found during the first live run:
+
+- turn-taking uses inverse-frequency weighting, focal loss, and a stronger
+  primary-task multiplier so the majority class is not the cheapest solution
+- every tuning stage shares the same 75-epoch cosine schedule, so resuming from
+  epoch 5 or 15 does not resume at the minimum learning rate
+
+Validation logs include predicted support, recall, F1, balanced accuracy, active
+class count, and the majority-class macro-F1 baseline. If all stage-1 candidates
+remain collapsed, the tuning script stops before the expensive continuation.
+
 ## 6. Evaluate The Selected Winner
 
 Only after tuning and long training complete:
 
 ```bash
 python scripts/evaluate_selected_run.py \
-  --selection /content/drive/MyDrive/facepred/runs/audio_campaign_v1/selection.json \
+  --selection /content/drive/MyDrive/facepred/runs/audio_campaign_v2/selection.json \
   --cache-dir /content/facepred_cache \
   --split test \
   --device cuda
@@ -208,9 +225,10 @@ pip install numpy==1.26.4 pandas scipy pyyaml
 rm -rf /content/facepred_cache
 mkdir -p /content/facepred_cache
 rsync -a --exclude '.progress/' /content/drive/MyDrive/facepred/cache/meld_audio_causal_v1/ /content/facepred_cache/
+python scripts/inspect_training_cache.py --cache-dir /content/facepred_cache --split dev
 python scripts/tune_and_train_colab.py \
   --cache-dir /content/facepred_cache \
-  --output-root /content/drive/MyDrive/facepred/runs/audio_campaign_v1 \
+  --output-root /content/drive/MyDrive/facepred/runs/audio_campaign_v2 \
   --device cuda --batch-size 32 --stage1-epochs 5 --stage2-epochs 15 \
   --max-epochs 75 --save-every-steps 100 --early-stopping-patience 12
 ```

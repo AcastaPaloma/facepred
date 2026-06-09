@@ -24,6 +24,25 @@ The 25-dimensional causal audio-statistics representation is a practical first
 baseline for Colab Free. eGeMAPS, wav2vec2, and MediaPipe remain planned
 feature-cache ablations; they must also obey the causal feature policy.
 
+### Campaign 1.1 Collapse-Prevention Amendment
+
+The first live stage-1 run exposed a majority-class collapse: validation
+turn-taking accuracy matched the majority-class frequency exactly while
+macro-F1 remained at the majority baseline. The corrected campaign uses:
+
+- inverse-frequency weighting and focal loss for the primary turn-taking head
+- a `2.0` primary turn-loss multiplier and square-root inverse weighting for
+  auxiliary categorical heads
+- only `5%` modality dropout for the audio-first baseline
+- one 75-epoch cosine schedule shared across the 5/15/75 successive-halving
+  stages, rather than restarting or exhausting the schedule at each stage
+- explicit predicted-class support, per-class recall/F1, balanced accuracy, and
+  majority-baseline diagnostics
+- an automatic stop before stage 2 when every candidate remains collapsed
+
+The existing causal audio cache remains valid; these are training and evaluation
+changes, not feature-extraction changes.
+
 ---
 
 ## World Model Architecture

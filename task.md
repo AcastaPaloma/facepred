@@ -43,3 +43,12 @@
 - [x] Dev-only successive-halving tuning and 75-epoch winner continuation
 - [x] Per-horizon corpus metrics and final test confusion matrices
 - [x] Colab Free real-training notebook and runbook
+
+## Phase 7: Live Campaign Hardening
+- [x] Detect and diagnose majority-class collapse
+- [x] Inverse-frequency + focal primary turn objective
+- [x] Auxiliary categorical class balancing
+- [x] Shared long-horizon scheduler across successive-halving stages
+- [x] Predicted-support, per-class, balanced-accuracy, and majority-baseline metrics
+- [x] Automatic collapse gate before expensive continuation
+- [x] Cache signal inspection script and campaign-v2 Colab instructions

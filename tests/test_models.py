@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from facepred.models import FacePredLoss, FacePredWorldModel
+from facepred.models.losses import sequence_cross_entropy
 
 
 def tiny_model_config() -> dict:
@@ -68,3 +69,24 @@ def test_world_model_predict_step_runs_eval_mode() -> None:
 
     assert outputs["rssm_state"].shape[:2] == (1, 2)
     assert model.training is False
+
+
+def test_weighted_focal_cross_entropy_rewards_minority_correction() -> None:
+    logits = torch.tensor(
+        [
+            [4.0, 0.0],
+            [4.0, 0.0],
+            [4.0, 0.0],
+            [4.0, 0.0],
+        ],
+        requires_grad=True,
+    )
+    targets = torch.tensor([0, 0, 0, 1])
+    weights = torch.tensor([0.5, 1.5])
+
+    loss = sequence_cross_entropy(logits, targets, class_weights=weights, focal_gamma=1.5)
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert logits.grad is not None
+    assert logits.grad[-1, 1] < 0

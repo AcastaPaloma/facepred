@@ -12,6 +12,7 @@ from facepred.data import (
 )
 from scripts.prepare_meld_audio_cache import extract_causal_audio_features
 from scripts.prepare_meld_cache import build_step_targets
+from scripts.train_world_model import WorldMetricAccumulator
 
 
 def test_cached_sequence_dataset_round_trip(tmp_path) -> None:
@@ -85,3 +86,26 @@ def test_causal_audio_features_have_model_contract() -> None:
     assert vad.shape == (4, 3)
     assert quality.shape == (4, 4)
     assert torch.isfinite(audio).all()
+
+
+def test_world_metrics_expose_majority_collapse() -> None:
+    accumulator = WorldMetricAccumulator()
+    logits = torch.zeros(1, 4, 1, 4)
+    logits[..., 1] = 10.0
+    accumulator.update(
+        {
+            "turn_taking_logits": logits,
+            "turn_taking_entropy": torch.zeros(1, 4, 1),
+        },
+        {
+            "turn_taking": torch.tensor([[[0], [1], [1], [2]]]),
+            "mask": torch.ones(1, 4, dtype=torch.bool),
+            "horizon_mask": torch.ones(1, 4, 1, dtype=torch.bool),
+        },
+    )
+
+    metrics = accumulator.metrics()
+
+    assert metrics["turn_active_classes_mean"] == 1.0
+    assert metrics["turn_macro_f1_mean"] == metrics["turn_majority_macro_f1_mean"]
+    assert metrics["turn_pred_support/h0/class1"] == 4.0

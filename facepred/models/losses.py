@@ -31,6 +31,8 @@ class FacePredLoss(nn.Module):
         weights: Mapping[str, float] | None = None,
         label_smoothing: float = 0.0,
         turn_class_weights: torch.Tensor | None = None,
+        class_weights: Mapping[str, torch.Tensor] | None = None,
+        focal_gammas: Mapping[str, float] | None = None,
     ) -> None:
         super().__init__()
         self.weights = {
@@ -44,7 +46,15 @@ class FacePredLoss(nn.Module):
         if weights:
             self.weights.update({k: float(v) for k, v in weights.items()})
         self.label_smoothing = label_smoothing
-        self.register_buffer("turn_class_weights", turn_class_weights)
+        self.focal_gammas = {key: float(value) for key, value in (focal_gammas or {}).items()}
+        resolved_weights = dict(class_weights or {})
+        if turn_class_weights is not None:
+            resolved_weights["turn_taking"] = turn_class_weights
+        self._class_weight_buffers: dict[str, str] = {}
+        for component, values in resolved_weights.items():
+            buffer_name = f"{component}_class_weights"
+            self.register_buffer(buffer_name, values.float())
+            self._class_weight_buffers[component] = buffer_name
 
     def forward(
         self,
@@ -69,7 +79,6 @@ class FacePredLoss(nn.Module):
             pred_key="turn_taking_logits",
             target_keys=("turn_taking", "turn_labels"),
             component="turn_taking",
-            class_weights=self.turn_class_weights,
         )
         total = self._add_ce(
             predictions,
@@ -140,14 +149,21 @@ class FacePredLoss(nn.Module):
         if target is None:
             return total
         logits = predictions[pred_key]
+        if class_weights is None:
+            class_weights = self._class_weights(component)
         loss = sequence_cross_entropy(
             logits,
             target,
             label_smoothing=self.label_smoothing,
             class_weights=class_weights,
+            focal_gamma=self.focal_gammas.get(component, 0.0),
         )
         components[component] = loss
         return total + self.weights[component] * loss
+
+    def _class_weights(self, component: str) -> torch.Tensor | None:
+        buffer_name = self._class_weight_buffers.get(component)
+        return getattr(self, buffer_name) if buffer_name is not None else None
 
     def _device_from_predictions(self, predictions: Mapping[str, torch.Tensor | RSSMOutput]) -> torch.device:
         for value in predictions.values():
@@ -164,17 +180,35 @@ def sequence_cross_entropy(
     ignore_index: int = -100,
     label_smoothing: float = 0.0,
     class_weights: torch.Tensor | None = None,
+    focal_gamma: float = 0.0,
 ) -> torch.Tensor:
     """Cross entropy for ``[..., classes]`` logits and matching integer targets."""
     targets = targets.to(device=logits.device, dtype=torch.long)
     targets = match_prediction_shape(logits[..., 0], targets)
-    return F.cross_entropy(
-        logits.reshape(-1, logits.shape[-1]),
-        targets.reshape(-1),
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    flat_targets = targets.reshape(-1)
+    valid = flat_targets != ignore_index
+    if not valid.any():
+        return flat_logits.sum() * 0.0
+
+    weights = class_weights.to(logits.device) if class_weights is not None else None
+    losses = F.cross_entropy(
+        flat_logits,
+        flat_targets,
         ignore_index=ignore_index,
         label_smoothing=label_smoothing,
-        weight=class_weights.to(logits.device) if class_weights is not None else None,
+        weight=weights,
+        reduction="none",
     )
+    if focal_gamma > 0:
+        probabilities = F.softmax(flat_logits[valid], dim=-1)
+        target_probabilities = probabilities.gather(1, flat_targets[valid, None]).squeeze(1)
+        losses[valid] = losses[valid] * (1.0 - target_probabilities).pow(focal_gamma)
+
+    denominator = valid.sum().to(losses.dtype)
+    if weights is not None:
+        denominator = weights[flat_targets[valid]].sum()
+    return losses[valid].sum() / denominator.clamp_min(1.0e-8)
 
 
 def multiclass_brier_score(logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100) -> torch.Tensor:

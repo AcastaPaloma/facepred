@@ -29,6 +29,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-epochs", type=int, default=75)
     parser.add_argument("--save-every-steps", type=int, default=100)
     parser.add_argument("--early-stopping-patience", type=int, default=12)
+    parser.add_argument(
+        "--minimum-stage1-improvement",
+        type=float,
+        default=0.005,
+        help="Required macro-F1 gain over the majority baseline before long training.",
+    )
+    parser.add_argument("--allow-collapsed-stage1", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     return parser.parse_args()
 
@@ -39,9 +46,18 @@ def main() -> int:
     output_root.mkdir(parents=True, exist_ok=True)
 
     stage1 = run_stage(CANDIDATES, args.stage1_epochs, args)
-    top2 = sorted(stage1, key=lambda item: item["score"], reverse=True)[:2]
+    write_json(output_root / "stage1_results.json", stage1)
+    viable_stage1 = [item for item in stage1 if not item["collapsed"]]
+    if not viable_stage1 and not args.allow_collapsed_stage1:
+        raise RuntimeError(
+            "All stage-1 candidates collapsed to a majority-class baseline. "
+            "The campaign stopped before expensive continuation; inspect the stage-1 diagnostics."
+        )
+    top2 = sorted(viable_stage1 or stage1, key=lambda item: item["score"], reverse=True)[:2]
     stage2 = run_stage([item["candidate"] for item in top2], args.stage2_epochs, args)
-    winner = max(stage2, key=lambda item: item["score"])["candidate"]
+    write_json(output_root / "stage2_results.json", stage2)
+    viable_stage2 = [item for item in stage2 if not item["collapsed"]]
+    winner = max(viable_stage2 or stage2, key=lambda item: item["score"])["candidate"]
     final = run_candidate(winner, args.max_epochs, args)
 
     selection = {
@@ -53,7 +69,7 @@ def main() -> int:
         "test_not_used_for_selection": True,
     }
     selection_path = output_root / "selection.json"
-    selection_path.write_text(json.dumps(selection, indent=2, sort_keys=True), encoding="utf-8")
+    write_json(selection_path, selection)
     print(json.dumps(selection, indent=2, sort_keys=True))
     return 0
 
@@ -102,30 +118,70 @@ def run_candidate(
         "--early-stopping-patience",
         str(args.early_stopping_patience),
         "--turn-class-weighting",
+        "inverse",
+        "--aux-class-weighting",
         "sqrt_inverse",
+        "--turn-focal-gamma",
+        "1.5",
+        "--turn-loss-weight",
+        "2.0",
+        "--modality-dropout",
+        "0.05",
+        "--schedule-epochs",
+        str(args.max_epochs),
     ]
     if not args.no_amp:
         command.append("--amp")
     subprocess.run(command, check=True)
-    score, completed_epochs = read_score(run_dir / "metrics.jsonl")
+    diagnostics = read_score(
+        run_dir / "metrics.jsonl",
+        args.minimum_stage1_improvement,
+        max_epochs=epochs,
+    )
     return {
         "candidate": candidate,
         "epochs_requested": epochs,
-        "epochs_completed": completed_epochs,
-        "score": score,
+        **diagnostics,
         "run_dir": str(run_dir),
     }
 
 
-def read_score(metrics_path: Path) -> tuple[float, int]:
+def write_json(path: Path, payload: Any) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def read_score(
+    metrics_path: Path,
+    minimum_improvement: float = 0.005,
+    max_epochs: int | None = None,
+) -> dict[str, Any]:
     records = [
         json.loads(line)
         for line in metrics_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    score = max(float(record.get("best_score", -float("inf"))) for record in records)
+    if max_epochs is not None:
+        records = [record for record in records if int(record["epoch"]) < max_epochs]
+    if not records:
+        raise ValueError(f"No completed epochs available in {metrics_path}")
+    best_record = max(
+        records,
+        key=lambda record: float(record.get("val", {}).get("turn_macro_f1_mean", -float("inf"))),
+    )
+    val = best_record.get("val", {})
+    score = float(val.get("turn_macro_f1_mean", best_record.get("best_score", -float("inf"))))
+    majority_score = float(val.get("turn_majority_macro_f1_mean", 0.0))
+    active_classes = float(val.get("turn_active_classes_mean", 0.0))
     completed = max(int(record["epoch"]) for record in records) + 1
-    return score, completed
+    return {
+        "epochs_completed": completed,
+        "score": score,
+        "majority_score": majority_score,
+        "improvement_over_majority": score - majority_score,
+        "active_classes_mean": active_classes,
+        "collapsed": active_classes < 2.0 or score < majority_score + minimum_improvement,
+        "best_epoch": int(best_record["epoch"]),
+    }
 
 
 if __name__ == "__main__":
