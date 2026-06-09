@@ -15,6 +15,7 @@ from facepred.engine.precompute import (
     GateThresholds,
     PrecomputeEngine,
     extract_turn_probs,
+    extract_yield_probs,
     normalized_entropy,
     thresholds_from_config,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "compute_multitask_loss",
     "evaluate_predictions",
     "extract_turn_probs",
+    "extract_yield_probs",
     "load_project_config",
     "macro_f1",
     "make_synthetic_batch",

@@ -43,6 +43,28 @@ macro-F1 remained at the majority baseline. The corrected campaign uses:
 The existing causal audio cache remains valid; these are training and evaluation
 changes, not feature-extraction changes.
 
+### Campaign 2 Amendment: Corrected Safe-Yield Baseline
+
+Campaign v3 replaces the earlier utterance-stamped turn target with sparse,
+horizon-specific events and an explicit safe-yield objective. This amendment
+takes precedence for current experiments.
+
+| Decision | Campaign v3 choice |
+|---|---|
+| Cache | Schema v2 in `meld_audio_yield_v2`; v1 remains readable but cannot train a safe-yield model |
+| Feature causality | Rolling VAD normalization uses only current and preceding frames |
+| Primary target | Binary safe shift within 200 ms and 1000 ms |
+| Auxiliary targets | Earliest hold/shift/backchannel/overlap event and timestep-specific time-to-yield bucket |
+| Primary baseline | Deterministic GRU, concat fusion, no learned reliability gate |
+| Selection | Mean dev safe-yield average precision |
+| Calibration | Per-horizon temperature and threshold fitted on dev at minimum 90% precision |
+| Ablations | Capacity, learning rate, fusion, stochastic latent, and yield weighting |
+| Main run | Maximum 50 epochs with patience-12 early stopping |
+
+Full VAP and visual fusion remain follow-up experiments on continuous dyadic
+conversation data. MELD does not provide the separated continuous speaker
+channels required for an honest VAP objective.
+
 ---
 
 ## World Model Architecture

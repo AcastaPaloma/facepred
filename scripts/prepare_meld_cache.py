@@ -44,6 +44,12 @@ from facepred.engine.trainer import load_project_config
 
 DEFAULT_CHEAP_MODALITIES = ("vad", "text", "quality")
 TURN_IGNORE_INDEX = -100
+EVENT_GAP_BUCKETS = {
+    0: "overlap",
+    1: "gap_le_250ms",
+    2: "gap_250_750ms",
+    3: "gap_gt_750ms",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -130,6 +136,8 @@ def main() -> int:
             "stride_s": stride_s,
             "config": str(Path(args.config)),
             "horizons_ms": horizons_ms,
+            "target_schema": "earliest_event_safe_yield_v2",
+            "event_gap_buckets": EVENT_GAP_BUCKETS,
             "causal_features": False,
             "oracle_text": "text" in modalities,
         },
@@ -284,40 +292,97 @@ def project_dialogue_to_steps(
             rows.append(empty_step(time_s))
             continue
 
-        time_to_yield_s = source.get("time_to_yield_s", np.nan)
-        if pd.notna(time_to_yield_s):
-            time_to_yield_s = max(0.0, float(source["end_s"]) + float(time_to_yield_s) - float(time_s))
-
         rows.append(
             {
                 "time_s": float(time_s),
                 "is_active_speech": bool(is_active),
                 "utterance": str(source.get("utterance", "")),
                 "speaker": str(source.get("speaker", "")),
-                "turn_taking": int(source.get("turn_label_id", 0)),
-                "end_of_turn": int(source.get("end_of_turn_bucket_id", -1)),
+                "turn_taking": 0,
+                "end_of_turn": -1,
                 "dialog_act": int(source.get("dialog_act_id", 12)),
                 "emotion": int(source.get("emotion_id", 0)),
                 "valence": float(source.get("valence", 0.0)),
                 "arousal": float(source.get("arousal", 0.0)),
-                "time_to_yield_s": time_to_yield_s,
+                "time_to_yield_s": np.nan,
                 "overlap": int(source.get("turn_label", "") == "overlap"),
                 "valid": True,
             }
         )
 
     result = pd.DataFrame(rows)
-    missing_eot = result["end_of_turn"] < 0
-    if missing_eot.any():
-        result.loc[missing_eot, "end_of_turn"] = result.loc[missing_eot, "time_to_yield_s"].map(
-            lambda value: label_config.end_of_turn_num_buckets - 1
-            if pd.isna(value)
-            else min(
-                int(float(value) / max(label_config.max_end_of_turn_s, 1e-6) * label_config.end_of_turn_num_buckets),
-                label_config.end_of_turn_num_buckets - 1,
-            )
+    events = []
+    ordered = dialogue.sort_values(["start_s", "end_s"]).reset_index(drop=True)
+    for position in range(max(0, len(ordered) - 1)):
+        current = ordered.iloc[position]
+        following = ordered.iloc[position + 1]
+        label_id, gap_s = corrected_transition_event(current, following, label_config)
+        if label_id != 0:
+            events.append((float(following["start_s"]), label_id, gap_bucket(gap_s)))
+
+    times = result["time_s"].to_numpy(dtype=np.float64)
+    result["event_gap_bucket"] = -100
+    for event_time, label_id, event_gap_bucket in sorted(events):
+        event_index = int(np.searchsorted(times, event_time, side="left"))
+        if event_index < len(result) and int(result.at[event_index, "turn_taking"]) == 0:
+            result.at[event_index, "turn_taking"] = label_id
+            result.at[event_index, "event_gap_bucket"] = event_gap_bucket
+
+    shift_times = [event_time for event_time, label_id, _ in events if label_id == 1]
+    for index, time_s in enumerate(times):
+        future_shifts = [event_time for event_time in shift_times if event_time >= time_s]
+        if future_shifts:
+            result.at[index, "time_to_yield_s"] = max(0.0, min(future_shifts) - time_s)
+
+    result["end_of_turn"] = result["time_to_yield_s"].map(
+        lambda value: -1
+        if pd.isna(value)
+        else min(
+            int(
+                float(value)
+                / max(label_config.max_end_of_turn_s, 1e-6)
+                * label_config.end_of_turn_num_buckets
+            ),
+            label_config.end_of_turn_num_buckets - 1,
         )
+    )
     return result
+
+
+def gap_bucket(gap_s: float) -> int:
+    """Group floor-transfer offsets for event-level diagnostics."""
+
+    if gap_s < 0.0:
+        return 0
+    if gap_s <= 0.25:
+        return 1
+    if gap_s <= 0.75:
+        return 2
+    return 3
+
+
+def corrected_transition_event(
+    current: pd.Series,
+    following: pd.Series,
+    config: TurnLabelConfig,
+) -> tuple[int, float]:
+    """Classify a transition using corrected campaign-v3 event semantics."""
+
+    gap_s = float(following["start_s"]) - float(current["end_s"])
+    if current["speaker"] == following["speaker"]:
+        return 0, gap_s
+    if gap_s < 0.0:
+        return 3, gap_s
+    following_duration_ms = max(
+        0.0,
+        (float(following["end_s"]) - float(following["start_s"])) * 1000.0,
+    )
+    if (
+        gap_s * 1000.0 <= config.silence_threshold_ms
+        and following_duration_ms <= config.backchannel_max_duration_ms
+    ):
+        return 2, gap_s
+    return 1, gap_s
 
 
 def empty_step(time_s: float) -> dict[str, Any]:
@@ -446,33 +511,60 @@ def build_step_targets(
     *,
     horizon_steps: Sequence[int],
 ) -> dict[str, torch.Tensor]:
-    """Build genuinely future-shifted targets for every prediction horizon."""
+    """Build earliest-event, safe-yield, and future countdown targets."""
 
-    categorical = {
-        "turn_taking": torch.as_tensor(projected["turn_taking"].to_numpy(dtype=np.int64).copy()),
-        "end_of_turn": torch.as_tensor(projected["end_of_turn"].to_numpy(dtype=np.int64).copy()),
-        "dialog_act": torch.as_tensor(projected["dialog_act"].to_numpy(dtype=np.int64).copy()),
-        "emotion": torch.as_tensor(projected["emotion"].to_numpy(dtype=np.int64).copy()),
-    }
-    continuous = torch.as_tensor(
-        projected[["valence", "arousal"]].to_numpy(dtype=np.float32).copy()
-    )
     length = len(projected)
+    events = torch.as_tensor(projected["turn_taking"].to_numpy(dtype=np.int64).copy())
+    eot = torch.as_tensor(projected["end_of_turn"].to_numpy(dtype=np.int64).copy())
+    gap_buckets = torch.as_tensor(
+        projected.get("event_gap_bucket", pd.Series([-100] * length)).to_numpy(dtype=np.int64).copy()
+    )
+    time_to_yield = torch.as_tensor(
+        projected.get("time_to_yield_s", pd.Series([-100.0] * length))
+        .fillna(-100.0)
+        .to_numpy(dtype=np.float32)
+        .copy()
+    )
     horizon_mask = torch.zeros(length, len(horizon_steps), dtype=torch.bool)
     targets: dict[str, torch.Tensor] = {
-        name: torch.full((length, len(horizon_steps)), TURN_IGNORE_INDEX, dtype=torch.long)
-        for name in categorical
+        "turn_taking": torch.full(
+            (length, len(horizon_steps)), TURN_IGNORE_INDEX, dtype=torch.long
+        ),
+        "yield": torch.full(
+            (length, len(horizon_steps)), TURN_IGNORE_INDEX, dtype=torch.long
+        ),
+        "end_of_turn": torch.full(
+            (length, len(horizon_steps)), TURN_IGNORE_INDEX, dtype=torch.long
+        ),
+        "event_gap_bucket": torch.full(
+            (length, len(horizon_steps)), TURN_IGNORE_INDEX, dtype=torch.long
+        ),
+        "time_to_yield_s": torch.full(
+            (length, len(horizon_steps)), float(TURN_IGNORE_INDEX), dtype=torch.float32
+        ),
     }
-    targets["valence_arousal"] = torch.zeros(length, len(horizon_steps), 2, dtype=torch.float32)
 
     for horizon_idx, offset in enumerate(horizon_steps):
         valid = max(0, length - int(offset))
         if valid <= 0:
             continue
         horizon_mask[:valid, horizon_idx] = True
-        for name, values in categorical.items():
-            targets[name][:valid, horizon_idx] = values[offset : offset + valid]
-        targets["valence_arousal"][:valid, horizon_idx] = continuous[offset : offset + valid]
+        targets["end_of_turn"][:valid, horizon_idx] = eot[:valid]
+        targets["end_of_turn"][:valid, horizon_idx][
+            targets["end_of_turn"][:valid, horizon_idx] < 0
+        ] = TURN_IGNORE_INDEX
+        for step in range(valid):
+            future = events[step + 1 : step + offset + 1]
+            non_hold = torch.nonzero(future != 0, as_tuple=False)
+            event = int(future[non_hold[0, 0]]) if non_hold.numel() else 0
+            targets["turn_taking"][step, horizon_idx] = event
+            targets["yield"][step, horizon_idx] = int(event == 1)
+            if event == 1:
+                targets["time_to_yield_s"][step, horizon_idx] = time_to_yield[step]
+            if non_hold.numel():
+                targets["event_gap_bucket"][step, horizon_idx] = gap_buckets[
+                    step + 1 + int(non_hold[0, 0])
+                ]
 
     targets["horizon_mask"] = horizon_mask
     return targets

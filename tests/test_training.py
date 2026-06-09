@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 import torch
 
 from scripts.train_world_model import (
@@ -115,3 +116,29 @@ def test_tuning_score_is_bounded_to_requested_stage(tmp_path) -> None:
 
     assert result["score"] == 0.25
     assert result["best_epoch"] == 4
+
+
+def test_tuning_score_ignores_grouped_yield_prevalence(tmp_path) -> None:
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "epoch": 0,
+                "val": {
+                    "yield_average_precision_mean": 0.35,
+                    "yield_prevalence/h0": 0.1,
+                    "yield_prevalence/h1": 0.2,
+                    "yield_prevalence/h0/gap_0": 1.0,
+                    "yield_prevalence/h1/gap_3": 1.0,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = read_score(metrics_path)
+
+    assert result["score"] == 0.35
+    assert result["majority_score"] == pytest.approx(0.15)
+    assert result["collapsed"] is False

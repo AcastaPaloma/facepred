@@ -2,14 +2,15 @@
 
 ## Classification
 
-This is the first defensible FacePred training campaign:
+This is the corrected, defensible FacePred safe-yield campaign:
 
 - real MELD audiovisual source files
 - real decoded audio
-- causal 100 ms audio statistics and energy VAD
+- causal 100 ms audio statistics and rolling, prefix-only energy VAD
 - no ground-truth transcript input
-- genuinely future-shifted 200 ms and 1000 ms targets
-- reliability-gated fusion, categorical RSSM, and multitask heads
+- sparse earliest-event and explicit safe-yield targets at 200 ms and 1000 ms
+- deterministic concat baseline with controlled fusion/RSSM ablations
+- dev-fitted per-horizon temperature and conservative commit thresholds
 - dev-only successive-halving selection
 - one final test evaluation after model selection
 
@@ -25,14 +26,15 @@ The pipeline writes these persistent artifacts:
 ```text
 MyDrive/facepred/
   data/MELD.Raw.tar.gz
-  cache/meld_audio_causal_v1/
+  cache/meld_audio_yield_v2/
     .progress/                 # one resumable file per completed dialogue
     manifest.json
     train/*.pt
     dev/*.pt
     test/*.pt
-  runs/audio_campaign_v2/
+  runs/audio_campaign_v3/
     selection.json
+    silence_baseline.json
     <candidate>/
       checkpoints/
         best.pt
@@ -40,6 +42,7 @@ MyDrive/facepred/
         step_XXXXXXXX.pt
       metrics.jsonl
       run_config.json
+      yield_calibration.json
 ```
 
 After any disconnect, remount Drive, clone/install the repository, rerun data
@@ -122,7 +125,7 @@ First run a two-dialogue validation:
 ```bash
 python scripts/prepare_meld_audio_cache.py \
   --data-root /content/facepred_data \
-  --output-dir /content/drive/MyDrive/facepred/cache/meld_audio_causal_smoke \
+  --output-dir /content/drive/MyDrive/facepred/cache/meld_audio_yield_smoke \
   --max-dialogues 2
 ```
 
@@ -131,7 +134,7 @@ Then build the full persistent cache:
 ```bash
 python scripts/prepare_meld_audio_cache.py \
   --data-root /content/facepred_data \
-  --output-dir /content/drive/MyDrive/facepred/cache/meld_audio_causal_v1
+  --output-dir /content/drive/MyDrive/facepred/cache/meld_audio_yield_v2
 ```
 
 If Colab disconnects, rerun the staging command and the same cache command.
@@ -144,7 +147,7 @@ Change the Colab runtime to GPU. Then rerun mount, clone/install, and:
 ```bash
 rm -rf /content/facepred_cache
 mkdir -p /content/facepred_cache
-rsync -a --exclude '.progress/' /content/drive/MyDrive/facepred/cache/meld_audio_causal_v1/ /content/facepred_cache/
+rsync -a --exclude '.progress/' /content/drive/MyDrive/facepred/cache/meld_audio_yield_v2/ /content/facepred_cache/
 python scripts/inspect_training_cache.py --cache-dir /content/facepred_cache --split train
 python scripts/inspect_training_cache.py --cache-dir /content/facepred_cache --split dev
 ```
@@ -153,48 +156,40 @@ Training reads the cache from local runtime disk and writes checkpoints to Drive
 
 ## 5. Tune Then Train
 
-If you already ran the collapsed `audio_campaign_v1`, keep its artifacts for
-comparison but start this corrected run under `audio_campaign_v2`. Reuse the
-existing `meld_audio_causal_v1` cache; it does not need to be rebuilt.
+Keep earlier campaign artifacts for historical comparison. Campaign v3 requires
+the rebuilt `meld_audio_yield_v2` cache because target semantics and VAD
+normalization changed.
 
 ```bash
 python scripts/tune_and_train_colab.py \
   --cache-dir /content/facepred_cache \
-  --output-root /content/drive/MyDrive/facepred/runs/audio_campaign_v2 \
+  --output-root /content/drive/MyDrive/facepred/runs/audio_campaign_v3 \
   --device cuda \
   --batch-size 32 \
   --stage1-epochs 5 \
   --stage2-epochs 15 \
-  --max-epochs 75 \
+  --max-epochs 50 \
   --save-every-steps 100 \
   --early-stopping-patience 12
 ```
 
-The sweep follows the architecture registry's highest-impact early knobs:
+The sweep compares deterministic GRU capacity and learning rate, concat versus
+cross-attention fusion, deterministic versus stochastic state, and balanced
+versus unweighted safe-yield loss. All candidates use the same corrected cache.
 
-- RSSM XS versus S
-- learning rate `1e-4` versus `3e-4`
-
-All candidates use cross-attention, learned reliability gating, categorical
-latents, class-balanced turn loss, modality dropout, AdamW, cosine warmup, and
-the documented 200 ms/1000 ms horizons.
-
-The four candidates train for five epochs. The top two continue to fifteen.
-The winner continues toward 75 epochs with early stopping.
+The six candidates train for five epochs. The top three continue to fifteen.
+The winner continues toward 50 epochs with early stopping.
 
 Rerunning the same command is the recovery procedure. Completed candidates and
 epochs are resumed rather than restarted.
 
-Campaign v2 corrects two issues found during the first live run:
-
-- turn-taking uses inverse-frequency weighting, focal loss, and a stronger
-  primary-task multiplier so the majority class is not the cheapest solution
-- every tuning stage shares the same 75-epoch cosine schedule, so resuming from
-  epoch 5 or 15 does not resume at the minimum learning rate
-
-Validation logs include predicted support, recall, F1, balanced accuracy, active
-class count, and the majority-class macro-F1 baseline. If all stage-1 candidates
-remain collapsed, the tuning script stops before the expensive continuation.
+The campaign first records a sustained-silence endpointing baseline. Validation
+selects on mean safe-yield average precision and reports precision, recall, F1,
+Brier score, ECE, false commits, late responses, prediction lead time,
+floor-transfer-gap groups, sparse event confusion matrices, and prevalence.
+Candidates that do not beat prevalence AP by `0.02` stop before continuation.
+After selecting the winner, `yield_calibration.json` is fitted on dev at a
+minimum precision of 90%.
 
 ## 6. Evaluate The Selected Winner
 
@@ -202,14 +197,14 @@ Only after tuning and long training complete:
 
 ```bash
 python scripts/evaluate_selected_run.py \
-  --selection /content/drive/MyDrive/facepred/runs/audio_campaign_v2/selection.json \
+  --selection /content/drive/MyDrive/facepred/runs/audio_campaign_v3/selection.json \
   --cache-dir /content/facepred_cache \
   --split test \
   --device cuda
 ```
 
-The resulting JSON includes losses, per-horizon accuracy/macro-F1, class support,
-and confusion matrices.
+The resulting JSON includes safe-yield metrics, lead-time and gap diagnostics,
+auxiliary event confusion matrices, and the path to the dev calibration artifact.
 
 ## Recovery Cell
 
@@ -224,11 +219,11 @@ pip install -e .
 pip install numpy==1.26.4 pandas scipy pyyaml
 rm -rf /content/facepred_cache
 mkdir -p /content/facepred_cache
-rsync -a --exclude '.progress/' /content/drive/MyDrive/facepred/cache/meld_audio_causal_v1/ /content/facepred_cache/
+rsync -a --exclude '.progress/' /content/drive/MyDrive/facepred/cache/meld_audio_yield_v2/ /content/facepred_cache/
 python scripts/inspect_training_cache.py --cache-dir /content/facepred_cache --split dev
 python scripts/tune_and_train_colab.py \
   --cache-dir /content/facepred_cache \
-  --output-root /content/drive/MyDrive/facepred/runs/audio_campaign_v2 \
+  --output-root /content/drive/MyDrive/facepred/runs/audio_campaign_v3 \
   --device cuda --batch-size 32 --stage1-epochs 5 --stage2-epochs 15 \
-  --max-epochs 75 --save-every-steps 100 --early-stopping-patience 12
+  --max-epochs 50 --save-every-steps 100 --early-stopping-patience 12
 ```

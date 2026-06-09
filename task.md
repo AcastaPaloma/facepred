@@ -52,3 +52,12 @@
 - [x] Predicted-support, per-class, balanced-accuracy, and majority-baseline metrics
 - [x] Automatic collapse gate before expensive continuation
 - [x] Cache signal inspection script and campaign-v2 Colab instructions
+
+## Phase 8: Corrected Safe-Yield Campaign
+- [x] Cache schema v2 with causal rolling VAD normalization
+- [x] Sparse earliest-event targets and timestep-specific yield countdown
+- [x] Explicit safe-yield head, weighted binary loss, and calibrated gating
+- [x] Deterministic concat baseline plus controlled model ablations
+- [x] Yield AP, calibration, false-commit, late-response, lead-time, and gap metrics
+- [x] Silence-threshold endpointing baseline and dev calibration artifact
+- [x] Campaign-v3 Colab notebook and runbook

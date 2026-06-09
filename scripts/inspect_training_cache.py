@@ -19,7 +19,9 @@ from facepred.data import CacheManifest, make_cached_dataloader
 
 TARGET_NUM_CLASSES = {
     "turn_taking": 4,
+    "yield": 2,
     "end_of_turn": 10,
+    "event_gap_bucket": 4,
     "dialog_act": 13,
     "emotion": 7,
 }
@@ -73,7 +75,7 @@ def inspect_loader(loader: Any, *, max_batches: int | None = None) -> dict[str, 
             tracker = features.setdefault(name, RunningMoments())
             tracker.update(values[mask].float())
         for name, values in batch["targets"].items():
-            if name in {"valence_arousal", "horizon_mask"}:
+            if name in {"horizon_mask", "time_to_yield_s"}:
                 continue
             flattened = values.reshape(-1, values.shape[-1]) if values.ndim >= 3 else values.reshape(-1, 1)
             per_horizon = targets.setdefault(name, [])

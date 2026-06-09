@@ -10,10 +10,22 @@ from pathlib import Path
 from typing import Any
 
 CANDIDATES = (
-    {"name": "xs_lr1e4", "model": "configs/model/rssm_xs_audio.yaml", "lr": "1e-4"},
-    {"name": "xs_lr3e4", "model": "configs/model/rssm_xs_audio.yaml", "lr": "3e-4"},
-    {"name": "s_lr1e4", "model": "configs/model/rssm_s_audio.yaml", "lr": "1e-4"},
-    {"name": "s_lr3e4", "model": "configs/model/rssm_s_audio.yaml", "lr": "3e-4"},
+    {"name": "gru_xs_concat_lr3e4", "model": "configs/model/gru_xs_audio_yield.yaml", "lr": "3e-4"},
+    {"name": "gru_s_concat_lr1e4", "model": "configs/model/gru_s_audio_yield.yaml", "lr": "1e-4"},
+    {"name": "gru_s_concat_lr3e4", "model": "configs/model/gru_s_audio_yield.yaml", "lr": "3e-4"},
+    {
+        "name": "gru_s_cross_attention_lr3e4",
+        "model": "configs/model/gru_s_audio_yield.yaml",
+        "lr": "3e-4",
+        "fusion": "cross_attention",
+    },
+    {"name": "rssm_s_concat_lr3e4", "model": "configs/model/rssm_s_audio_yield.yaml", "lr": "3e-4"},
+    {
+        "name": "gru_s_concat_lr3e4_unweighted",
+        "model": "configs/model/gru_s_audio_yield.yaml",
+        "lr": "3e-4",
+        "yield_weighting": "none",
+    },
 )
 
 
@@ -26,14 +38,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--stage1-epochs", type=int, default=5)
     parser.add_argument("--stage2-epochs", type=int, default=15)
-    parser.add_argument("--max-epochs", type=int, default=75)
+    parser.add_argument("--max-epochs", type=int, default=50)
     parser.add_argument("--save-every-steps", type=int, default=100)
     parser.add_argument("--early-stopping-patience", type=int, default=12)
     parser.add_argument(
         "--minimum-stage1-improvement",
         type=float,
-        default=0.005,
-        help="Required macro-F1 gain over the majority baseline before long training.",
+        default=0.02,
+        help="Required average-precision gain over yield prevalence before long training.",
     )
     parser.add_argument("--allow-collapsed-stage1", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
@@ -44,6 +56,20 @@ def main() -> int:
     args = parse_args()
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    silence_output = output_root / "silence_baseline.json"
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/evaluate_silence_baseline.py",
+            "--cache-dir",
+            args.cache_dir,
+            "--split",
+            "dev",
+            "--output",
+            str(silence_output),
+        ],
+        check=True,
+    )
 
     stage1 = run_stage(CANDIDATES, args.stage1_epochs, args)
     write_json(output_root / "stage1_results.json", stage1)
@@ -53,12 +79,30 @@ def main() -> int:
             "All stage-1 candidates collapsed to a majority-class baseline. "
             "The campaign stopped before expensive continuation; inspect the stage-1 diagnostics."
         )
-    top2 = sorted(viable_stage1 or stage1, key=lambda item: item["score"], reverse=True)[:2]
-    stage2 = run_stage([item["candidate"] for item in top2], args.stage2_epochs, args)
+    top3 = sorted(viable_stage1 or stage1, key=lambda item: item["score"], reverse=True)[:3]
+    stage2 = run_stage([item["candidate"] for item in top3], args.stage2_epochs, args)
     write_json(output_root / "stage2_results.json", stage2)
     viable_stage2 = [item for item in stage2 if not item["collapsed"]]
     winner = max(viable_stage2 or stage2, key=lambda item: item["score"])["candidate"]
     final = run_candidate(winner, args.max_epochs, args)
+    calibration_path = Path(final["run_dir"]) / "yield_calibration.json"
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/calibrate_yield.py",
+            "--cache-dir",
+            args.cache_dir,
+            "--checkpoint",
+            str(Path(final["run_dir"]) / "checkpoints" / "best.pt"),
+            "--split",
+            "dev",
+            "--device",
+            args.device,
+            "--output",
+            str(calibration_path),
+        ],
+        check=True,
+    )
 
     selection = {
         "strategy": "successive_halving",
@@ -66,6 +110,8 @@ def main() -> int:
         "stage2": stage2,
         "winner": winner,
         "final": final,
+        "silence_baseline": str(silence_output),
+        "yield_calibration": str(calibration_path),
         "test_not_used_for_selection": True,
     }
     selection_path = output_root / "selection.json"
@@ -92,7 +138,7 @@ def run_candidate(
         sys.executable,
         "scripts/train_world_model.py",
         "--config",
-        "configs/config.yaml",
+        "configs/config_yield.yaml",
         "--model-config",
         candidate["model"],
         "--cache-dir",
@@ -124,12 +170,18 @@ def run_candidate(
         "--turn-focal-gamma",
         "1.5",
         "--turn-loss-weight",
+        "0.5",
+        "--yield-loss-weight",
         "2.0",
+        "--yield-weighting",
+        candidate.get("yield_weighting", "balanced"),
         "--modality-dropout",
         "0.05",
         "--schedule-epochs",
         str(args.max_epochs),
     ]
+    if candidate.get("fusion"):
+        command.extend(["--fusion-type", candidate["fusion"]])
     if not args.no_amp:
         command.append("--amp")
     subprocess.run(command, check=True)
@@ -166,12 +218,31 @@ def read_score(
         raise ValueError(f"No completed epochs available in {metrics_path}")
     best_record = max(
         records,
-        key=lambda record: float(record.get("val", {}).get("turn_macro_f1_mean", -float("inf"))),
+        key=lambda record: float(
+            record.get("val", {}).get(
+                "yield_average_precision_mean",
+                record.get("val", {}).get("turn_macro_f1_mean", -float("inf")),
+            )
+        ),
     )
     val = best_record.get("val", {})
-    score = float(val.get("turn_macro_f1_mean", best_record.get("best_score", -float("inf"))))
-    majority_score = float(val.get("turn_majority_macro_f1_mean", 0.0))
-    active_classes = float(val.get("turn_active_classes_mean", 0.0))
+    score = float(
+        val.get(
+            "yield_average_precision_mean",
+            val.get("turn_macro_f1_mean", best_record.get("best_score", -float("inf"))),
+        )
+    )
+    prevalence_values = [
+        float(value)
+        for key, value in val.items()
+        if key.startswith("yield_prevalence/h") and key.count("/") == 1
+    ]
+    majority_score = (
+        sum(prevalence_values) / len(prevalence_values)
+        if prevalence_values
+        else float(val.get("turn_majority_macro_f1_mean", 0.0))
+    )
+    active_classes = float(val.get("turn_active_classes_mean", 2.0))
     completed = max(int(record["epoch"]) for record in records) + 1
     return {
         "epochs_completed": completed,
@@ -179,7 +250,7 @@ def read_score(
         "majority_score": majority_score,
         "improvement_over_majority": score - majority_score,
         "active_classes_mean": active_classes,
-        "collapsed": active_classes < 2.0 or score < majority_score + minimum_improvement,
+        "collapsed": score < majority_score + minimum_improvement,
         "best_epoch": int(best_record["epoch"]),
     }
 

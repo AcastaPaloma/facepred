@@ -16,6 +16,7 @@ class HeadConfig:
     dialog_act_classes: int = 13
     emotion_classes: int = 7
     hidden_dim: int = 128
+    yield_enabled: bool = False
 
 
 class MLPHead(nn.Module):
@@ -54,6 +55,11 @@ class PredictionHeads(nn.Module):
         self.turn_taking = MLPHead(
             state_dim, hidden, self.num_horizons * self.config.turn_classes, dropout
         )
+        self.yield_prediction = (
+            MLPHead(state_dim, hidden, self.num_horizons, dropout)
+            if self.config.yield_enabled
+            else None
+        )
         self.end_of_turn = MLPHead(
             state_dim, hidden, self.num_horizons * self.config.end_of_turn_buckets, dropout
         )
@@ -84,8 +90,7 @@ class PredictionHeads(nn.Module):
             batch, steps, self.num_horizons, self.config.emotion_classes
         )
         turn_entropy = categorical_entropy(turn_logits)
-
-        return {
+        outputs = {
             "turn_taking_logits": turn_logits,
             "end_of_turn_logits": eot_logits,
             "dialog_act_logits": dialog_logits,
@@ -93,6 +98,17 @@ class PredictionHeads(nn.Module):
             "emotion_logits": emotion_logits,
             "turn_taking_entropy": turn_entropy,
         }
+        if self.yield_prediction is not None:
+            yield_logits = self.yield_prediction(state)
+            yield_probs = torch.sigmoid(yield_logits)
+            outputs.update(
+                {
+                    "yield_logits": yield_logits,
+                    "yield_probs": yield_probs,
+                    "yield_entropy": binary_entropy(yield_probs),
+                }
+            )
+        return outputs
 
 
 def categorical_entropy(logits: torch.Tensor) -> torch.Tensor:
@@ -100,3 +116,10 @@ def categorical_entropy(logits: torch.Tensor) -> torch.Tensor:
     log_probs = F.log_softmax(logits, dim=-1)
     probs = log_probs.exp()
     return -(probs * log_probs).sum(dim=-1)
+
+
+def binary_entropy(probs: torch.Tensor) -> torch.Tensor:
+    """Compute Bernoulli entropy for probabilities."""
+
+    probs = probs.clamp(1.0e-6, 1.0 - 1.0e-6)
+    return -(probs * probs.log() + (1.0 - probs) * (1.0 - probs).log())

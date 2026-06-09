@@ -2,7 +2,7 @@
 
 FacePred is an iteration-0 scaffold for a predictive multimodal interaction world model. The goal is to predict near-future conversational state from face, voice, text, and quality signals so an assistant can prepare candidate responses before the user fully yields the turn.
 
-The architecture registry lives in [`.references/architectural_decisions.md`](.references/architectural_decisions.md). The current default is a small RSSM with categorical latents, multimodal reliability-gated fusion, and prediction heads for turn taking, end-of-turn timing, dialog act, affect, and uncertainty.
+The architecture registry lives in [`.references/architectural_decisions.md`](.references/architectural_decisions.md). The current real-audio campaign uses a deterministic recurrent baseline, causal concat fusion, explicit safe-yield prediction, sparse turn-event auxiliaries, and dev-fitted commit calibration.
 
 ## What Is Included
 
@@ -68,7 +68,9 @@ python scripts/demo.py
 
 The iteration-0 tensor contracts remain available for CPU smoke testing. The
 repository now also includes a resumable real-MELD audio campaign for Colab
-Free. Visual extraction and calibrated latency experiments remain later steps.
+Free. Campaign v3 uses cache schema v2, safe-yield average precision for model
+selection, a silence endpointing baseline, and calibrated commit thresholds.
+Visual extraction remains the next major ablation.
 
 See [`task.md`](task.md) for the current build tracker.
 

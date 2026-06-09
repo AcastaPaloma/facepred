@@ -21,7 +21,8 @@ from torch.utils.data import DataLoader, Dataset
 
 from facepred.utils import load_trusted_torch_artifact
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
+SUPPORTED_CACHE_VERSIONS = (1, 2)
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,12 @@ class CacheManifest:
             raise FileNotFoundError(f"Missing cache manifest: {manifest_path}")
         with manifest_path.open("r", encoding="utf-8") as handle:
             raw = json.load(handle)
+        version = int(raw.get("version", 1))
+        if version not in SUPPORTED_CACHE_VERSIONS:
+            raise ValueError(
+                f"Unsupported cache version {version}; supported versions are "
+                f"{SUPPORTED_CACHE_VERSIONS}"
+            )
 
         splits = {
             split: tuple(CacheShard(path=item["path"], num_sequences=int(item["num_sequences"]))
@@ -60,7 +67,7 @@ class CacheManifest:
         }
         return cls(
             cache_dir=root,
-            version=int(raw.get("version", CACHE_VERSION)),
+            version=version,
             modalities=tuple(raw.get("modalities", [])),
             sequence_length=int(raw.get("sequence_length", 0)),
             step_duration_ms=int(raw.get("step_duration_ms", 100)),

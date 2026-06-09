@@ -26,7 +26,7 @@ class ReliabilityGatedFusion(nn.Module):
             raise ValueError("input_dims must contain at least one modality")
         if fusion_type not in {"cross_attention", "concat", "perceiver"}:
             raise ValueError(f"Unsupported fusion_type: {fusion_type}")
-        if reliability not in {"learned", "heuristic"}:
+        if reliability not in {"learned", "heuristic", "none"}:
             raise ValueError(f"Unsupported reliability mode: {reliability}")
 
         self.modality_names = list(input_dims.keys())
@@ -162,8 +162,10 @@ class ReliabilityGatedFusion(nn.Module):
             else:
                 logits = self.gate_net(quality.float())
             gates = torch.sigmoid(logits) * availability
-        else:
+        elif self.reliability == "heuristic":
             gates = self._heuristic_gates(quality, availability)
+        else:
+            gates = availability
 
         fallback = availability / availability.sum(dim=-1, keepdim=True).clamp_min(1.0)
         gates = torch.where(gates.sum(dim=-1, keepdim=True) > 0, gates, fallback)

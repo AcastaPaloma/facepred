@@ -33,11 +33,13 @@ class FacePredLoss(nn.Module):
         turn_class_weights: torch.Tensor | None = None,
         class_weights: Mapping[str, torch.Tensor] | None = None,
         focal_gammas: Mapping[str, float] | None = None,
+        yield_pos_weight: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.weights = {
             "rssm_dynamics": 1.0,
             "turn_taking": 1.0,
+            "yield": 2.0,
             "end_of_turn": 0.5,
             "dialog_act": 0.5,
             "affect": 0.3,
@@ -47,6 +49,10 @@ class FacePredLoss(nn.Module):
             self.weights.update({k: float(v) for k, v in weights.items()})
         self.label_smoothing = label_smoothing
         self.focal_gammas = {key: float(value) for key, value in (focal_gammas or {}).items()}
+        if yield_pos_weight is not None:
+            self.register_buffer("yield_pos_weight", yield_pos_weight.float())
+        else:
+            self.yield_pos_weight = None
         resolved_weights = dict(class_weights or {})
         if turn_class_weights is not None:
             resolved_weights["turn_taking"] = turn_class_weights
@@ -80,6 +86,15 @@ class FacePredLoss(nn.Module):
             target_keys=("turn_taking", "turn_labels"),
             component="turn_taking",
         )
+        if "yield_logits" in predictions and "yield" in targets:
+            yield_loss = masked_binary_cross_entropy(
+                predictions["yield_logits"],
+                targets["yield"],
+                mask=targets.get("horizon_mask", targets.get("mask")),
+                pos_weight=self.yield_pos_weight,
+            )
+            components["yield"] = yield_loss
+            total = total + self.weights["yield"] * yield_loss
         total = self._add_ce(
             predictions,
             targets,
@@ -127,6 +142,15 @@ class FacePredLoss(nn.Module):
             brier = multiclass_brier_score(predictions["turn_taking_logits"], target)
             components["calibration"] = brier
             total = total + self.weights["calibration"] * brier
+
+        if "yield_logits" in predictions and "yield" in targets:
+            yield_brier = binary_brier_score(
+                predictions["yield_logits"],
+                targets["yield"],
+                mask=targets.get("horizon_mask", targets.get("mask")),
+            )
+            components["yield_calibration"] = yield_brier
+            total = total + self.weights["calibration"] * yield_brier
 
         components["total"] = total
         return LossOutput(total=total, components=components)
@@ -222,6 +246,52 @@ def multiclass_brier_score(logits: torch.Tensor, targets: torch.Tensor, ignore_i
     one_hot = F.one_hot(targets.clamp_min(0), num_classes=logits.shape[-1]).to(probs.dtype)
     squared = (probs - one_hot).pow(2).sum(dim=-1)
     return squared[valid].mean()
+
+
+def masked_binary_cross_entropy(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    mask: torch.Tensor | None = None,
+    pos_weight: torch.Tensor | None = None,
+    ignore_index: int = -100,
+) -> torch.Tensor:
+    """Binary cross entropy for horizon-shaped logits with masking."""
+
+    targets = match_prediction_shape(logits, targets.to(device=logits.device)).to(logits.dtype)
+    valid = targets != ignore_index
+    if mask is not None:
+        valid &= match_prediction_shape(logits, mask.to(device=logits.device, dtype=torch.bool))
+    if not valid.any():
+        return logits.sum() * 0.0
+    weights = None
+    if pos_weight is not None:
+        weights = pos_weight.to(logits.device)
+        while weights.ndim < logits.ndim:
+            weights = weights.unsqueeze(0)
+    losses = F.binary_cross_entropy_with_logits(
+        logits,
+        targets.clamp(0.0, 1.0),
+        reduction="none",
+        pos_weight=weights,
+    )
+    return losses[valid].mean()
+
+
+def binary_brier_score(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    mask: torch.Tensor | None = None,
+    ignore_index: int = -100,
+) -> torch.Tensor:
+    targets = match_prediction_shape(logits, targets.to(device=logits.device)).to(logits.dtype)
+    valid = targets != ignore_index
+    if mask is not None:
+        valid &= match_prediction_shape(logits, mask.to(device=logits.device, dtype=torch.bool))
+    if not valid.any():
+        return logits.sum() * 0.0
+    return (torch.sigmoid(logits)[valid] - targets[valid]).square().mean()
 
 
 def masked_mse_loss(

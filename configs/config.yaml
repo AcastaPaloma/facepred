@@ -37,7 +37,9 @@ engine:
   gate_yield_threshold: 0.8
   gate_entropy_max: 0.5
   gate_margin_min: 0.3
-  yield_class_index: 1  # hold=0, shift/yield=1, backchannel=2, overlap=3
+  commit_horizon_index: 0   # 200 ms safe-yield probability
+  planning_horizon_index: 1 # 1000 ms safe-yield probability
+  yield_calibration_path: null
 
 # === Inference ===
 inference:

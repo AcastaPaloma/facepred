@@ -4,6 +4,7 @@ import pandas as pd
 import torch
 
 from facepred.data import (
+    CacheManifest,
     CachedSequenceDataset,
     CacheShard,
     collate_cached_sequences,
@@ -69,7 +70,8 @@ def test_future_targets_are_shifted_and_masked() -> None:
 
     targets = build_step_targets(projected, horizon_steps=[1, 3])
 
-    assert targets["turn_taking"].tolist() == [[1, 3], [2, -100], [3, -100], [-100, -100]]
+    assert targets["turn_taking"].tolist() == [[1, 1], [2, -100], [3, -100], [-100, -100]]
+    assert targets["yield"].tolist() == [[1, 1], [0, -100], [0, -100], [-100, -100]]
     assert targets["horizon_mask"].tolist() == [
         [True, True],
         [True, False],
@@ -86,6 +88,28 @@ def test_causal_audio_features_have_model_contract() -> None:
     assert vad.shape == (4, 3)
     assert quality.shape == (4, 4)
     assert torch.isfinite(audio).all()
+
+
+def test_causal_audio_features_are_prefix_invariant() -> None:
+    waveform = torch.sin(torch.linspace(0.0, 100.0, 1600))
+    changed_future = waveform.clone()
+    changed_future[800:] = torch.randn_like(changed_future[800:]) * 10.0
+
+    first = extract_causal_audio_features(waveform, num_frames=4)
+    second = extract_causal_audio_features(changed_future, num_frames=4)
+
+    for first_tensor, second_tensor in zip(first, second, strict=True):
+        torch.testing.assert_close(first_tensor[:2], second_tensor[:2])
+
+
+def test_cache_v1_manifest_remains_loadable(tmp_path) -> None:
+    (tmp_path / "manifest.json").write_text(
+        '{"version": 1, "modalities": [], "sequence_length": 4, '
+        '"step_duration_ms": 100, "splits": {}, "metadata": {}}',
+        encoding="utf-8",
+    )
+
+    assert CacheManifest.load(tmp_path).version == 1
 
 
 def test_world_metrics_expose_majority_collapse() -> None:

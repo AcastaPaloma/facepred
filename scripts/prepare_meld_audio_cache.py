@@ -35,6 +35,7 @@ from facepred.data import (
 from facepred.engine.trainer import load_project_config
 from facepred.utils import load_trusted_torch_artifact
 from scripts.prepare_meld_cache import (
+    EVENT_GAP_BUCKETS,
     build_step_targets,
     label_config_from_project,
     project_dialogue_to_steps,
@@ -48,8 +49,8 @@ SAMPLE_RATE = 16_000
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/config.yaml")
-    parser.add_argument("--model-config", default="configs/model/rssm_xs_audio.yaml")
+    parser.add_argument("--config", default="configs/config_yield.yaml")
+    parser.add_argument("--model-config", default="configs/model/gru_s_audio_yield.yaml")
     parser.add_argument("--data-root", required=True, help="Extracted MELD.Raw root.")
     parser.add_argument("--output-dir", required=True, help="Persistent cache directory, normally Drive.")
     parser.add_argument("--splits", nargs="+", default=["train", "dev", "test"])
@@ -80,7 +81,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     extraction_config = {
-        "feature_mode": "causal_audio_stats_v1",
+        "feature_mode": "causal_audio_stats_v2",
         "feature_alignment": "previous_frame_right_edge",
         "model_config": model_config,
         "step_ms": step_ms,
@@ -169,11 +170,21 @@ def main() -> int:
         splits=split_shards,
         metadata={
             "source": "meld_raw_media",
-            "feature_mode": "causal_audio_stats_v1",
+            "feature_mode": "causal_audio_stats_v2",
             "feature_alignment": "previous_frame_right_edge",
             "causal_features": True,
             "oracle_text": False,
             "horizons_ms": horizons_ms,
+            "target_schema": "earliest_event_safe_yield_v2",
+            "event_gap_buckets": EVENT_GAP_BUCKETS,
+            "targets": [
+                "turn_taking",
+                "yield",
+                "end_of_turn",
+                "horizon_mask",
+                "event_gap_bucket",
+                "time_to_yield_s",
+            ],
             "model_config": str(args.model_config),
             "stats": split_stats,
         },
@@ -227,9 +238,10 @@ def process_dialogue(
             continue
         try:
             waveform = decode_audio(media_path)
-            local_audio, local_vad, local_quality = extract_causal_audio_features(
+            local_audio, _, _ = extract_causal_audio_features(
                 waveform,
                 num_frames=len(indices),
+                normalize_vad=False,
             )
         except Exception:
             stats["decode_errors"] += 1
@@ -243,11 +255,14 @@ def process_dialogue(
         index_tensor = torch.as_tensor(target_indices, dtype=torch.long)
         audio[index_tensor] += local_audio[: len(target_indices)]
         audio_counts[index_tensor] += 1.0
-        vad[index_tensor] = torch.maximum(vad[index_tensor], local_vad[: len(target_indices)])
-        quality[index_tensor] = torch.maximum(quality[index_tensor], local_quality[: len(target_indices)])
 
     present = audio_counts.squeeze(-1) > 0
     audio[present] /= audio_counts[present]
+    speech = causal_rolling_vad(audio[:, 0].clamp_min(0.0))
+    vad[:, 0] = speech
+    vad[:, 2] = speech
+    quality[:, 0] = speech
+    quality[:, 3] = present.float()
     features = {"audio_prosody": audio, "vad": vad, "quality": quality}
     targets = build_step_targets(projected, horizon_steps=horizon_steps)
     sequences = window_dialogue(
@@ -288,6 +303,7 @@ def extract_causal_audio_features(
     waveform: torch.Tensor,
     *,
     num_frames: int,
+    normalize_vad: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     frames = split_waveform(waveform.float(), num_frames)
     rows = []
@@ -298,14 +314,25 @@ def extract_causal_audio_features(
         previous = row
     audio = torch.stack(rows)
     rms = audio[:, 0].clamp_min(0.0)
-    low = torch.quantile(rms, 0.2)
-    high = torch.quantile(rms, 0.95)
-    speech = ((rms - low) / (high - low).clamp_min(1.0e-6)).clamp(0.0, 1.0)
+    speech = causal_rolling_vad(rms) if normalize_vad else torch.zeros_like(rms)
     vad = torch.stack([speech, torch.zeros_like(speech), speech], dim=-1)
     quality = torch.zeros(num_frames, 4, dtype=torch.float32)
     quality[:, 0] = speech
     quality[:, 3] = 1.0
     return audio, vad, quality
+
+
+def causal_rolling_vad(rms: torch.Tensor, window_frames: int = 50) -> torch.Tensor:
+    """Normalize energy using only the current and preceding frames."""
+
+    scores = []
+    for index in range(rms.numel()):
+        start = max(0, index + 1 - max(1, int(window_frames)))
+        prefix = rms[start : index + 1]
+        low = torch.quantile(prefix, 0.2)
+        high = torch.quantile(prefix, 0.95)
+        scores.append(((rms[index] - low) / (high - low).clamp_min(1.0e-6)).clamp(0.0, 1.0))
+    return torch.stack(scores) if scores else torch.empty_like(rms)
 
 
 def split_waveform(waveform: torch.Tensor, num_frames: int) -> list[torch.Tensor]:

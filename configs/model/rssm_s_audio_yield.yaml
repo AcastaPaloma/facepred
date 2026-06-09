@@ -1,0 +1,51 @@
+# Stochastic-latent ablation for corrected safe-yield training.
+rssm:
+  gru_hidden: 256
+  latent_type: categorical
+  categorical_classes: 32
+  categorical_dims: 16
+  gaussian_dim: 64
+  use_stochastic: true
+
+step_duration_ms: 100
+prediction_horizons_ms: [200, 1000]
+
+encoders:
+  audio_prosody:
+    input_dim: 25
+    hidden_dim: 128
+    output_dim: 128
+    num_layers: 2
+    dropout: 0.1
+  vad:
+    input_dim: 3
+    output_dim: 32
+  quality:
+    input_dim: 4
+    output_dim: 32
+
+fusion:
+  type: concat
+  embed_dim: 256
+  num_heads: 4
+  dropout: 0.1
+  reliability: none
+
+heads:
+  yield:
+    enabled: true
+  turn_taking:
+    num_classes: 4
+    hidden_dim: 256
+  end_of_turn:
+    num_buckets: 10
+    hidden_dim: 256
+  dialog_act:
+    num_classes: 13
+    hidden_dim: 256
+  affect:
+    type: both
+    num_emotions: 7
+    hidden_dim: 128
+  uncertainty:
+    method: entropy

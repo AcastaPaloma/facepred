@@ -44,3 +44,23 @@ def test_heuristic_fusion_uses_quality_signals() -> None:
 
     assert gates[0, 0, 0] > gates[0, 0, 1]
     assert gates[0, 1, 1] > gates[0, 1, 0]
+
+
+def test_concat_fusion_can_disable_reliability_gating() -> None:
+    fusion = ReliabilityGatedFusion(
+        {"audio_prosody": 8, "vad": 3},
+        embed_dim=8,
+        num_heads=2,
+        dropout=0.0,
+        fusion_type="concat",
+        reliability="none",
+    )
+    modalities = {
+        "audio_prosody": torch.randn(1, 2, 8),
+        "vad": torch.randn(1, 2, 3),
+    }
+
+    fused, gates = fusion(modalities, quality=torch.zeros(1, 2, 4))
+
+    assert fused.shape == (1, 2, 8)
+    assert torch.all(gates == 1)

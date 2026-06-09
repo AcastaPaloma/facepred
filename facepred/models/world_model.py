@@ -72,6 +72,7 @@ class FacePredWorldModel(nn.Module):
         eot_cfg = _get(heads_cfg, "end_of_turn", {})
         dialog_cfg = _get(heads_cfg, "dialog_act", {})
         affect_cfg = _get(heads_cfg, "affect", {})
+        yield_cfg = _get(heads_cfg, "yield", {})
         hidden_dim = int(
             _get(
                 turn_cfg,
@@ -85,6 +86,7 @@ class FacePredWorldModel(nn.Module):
             dialog_act_classes=int(_get(dialog_cfg, "num_classes", 13)),
             emotion_classes=int(_get(affect_cfg, "num_emotions", 7)),
             hidden_dim=hidden_dim,
+            yield_enabled=bool(_get(yield_cfg, "enabled", False)),
         )
         heads = PredictionHeads(
             state_dim=rssm.state_dim,

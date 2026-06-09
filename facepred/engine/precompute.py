@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -39,7 +41,10 @@ class GateThresholds:
     entropy_max: float = 0.5
     margin_min: float = 0.3
     precompute_k: int = 3
-    yield_class_index: int = 1
+    commit_horizon_index: int = 0
+    planning_horizon_index: int = 1
+    yield_temperatures: tuple[float, ...] = ()
+    yield_thresholds: tuple[float, ...] = ()
 
 
 @dataclass(slots=True)
@@ -105,6 +110,29 @@ def extract_turn_probs(predictions: Mapping[str, Any]) -> torch.Tensor:
     return probs / total
 
 
+def extract_yield_probs(
+    predictions: Mapping[str, Any],
+    temperatures: Sequence[float] | None = None,
+) -> torch.Tensor | None:
+    """Extract latest per-horizon safe-yield probabilities when available."""
+
+    if "yield_logits" in predictions:
+        logits = _latest_vector(predictions["yield_logits"])
+        if temperatures:
+            values = torch.as_tensor(temperatures, dtype=logits.dtype)
+            if values.numel() < logits.numel():
+                values = torch.nn.functional.pad(
+                    values,
+                    (0, logits.numel() - values.numel()),
+                    value=1.0,
+                )
+            logits = logits / values[: logits.numel()].clamp_min(1.0e-6)
+        return torch.sigmoid(logits)
+    if "yield_probs" in predictions:
+        return _latest_vector(predictions["yield_probs"])
+    return None
+
+
 def extract_entropy(predictions: Mapping[str, Any], turn_probs: torch.Tensor) -> float:
     if "turn_entropy" in predictions:
         tensor = predictions["turn_entropy"]
@@ -133,12 +161,23 @@ def thresholds_from_config(config: Mapping[str, Any] | None = None) -> GateThres
         if not isinstance(engine_cfg, Mapping):
             engine_cfg = {}
 
+    temperatures: tuple[float, ...] = ()
+    calibrated_thresholds: tuple[float, ...] = ()
+    calibration_path = engine_cfg.get("yield_calibration_path")
+    if calibration_path:
+        artifact = json.loads(Path(str(calibration_path)).read_text(encoding="utf-8"))
+        temperatures = tuple(float(value) for value in artifact.get("temperatures", []))
+        calibrated_thresholds = tuple(float(value) for value in artifact.get("thresholds", []))
+
     return GateThresholds(
-        yield_threshold=float(engine_cfg.get("gate_yield_threshold", 0.8) or 0.8),
-        entropy_max=float(engine_cfg.get("gate_entropy_max", 0.5) or 0.5),
-        margin_min=float(engine_cfg.get("gate_margin_min", 0.3) or 0.3),
-        precompute_k=int(engine_cfg.get("precompute_k", 3) or 3),
-        yield_class_index=int(engine_cfg.get("yield_class_index", 1) or 1),
+        yield_threshold=float(engine_cfg.get("gate_yield_threshold", 0.8)),
+        entropy_max=float(engine_cfg.get("gate_entropy_max", 0.5)),
+        margin_min=float(engine_cfg.get("gate_margin_min", 0.3)),
+        precompute_k=int(engine_cfg.get("precompute_k", 3)),
+        commit_horizon_index=int(engine_cfg.get("commit_horizon_index", 0)),
+        planning_horizon_index=int(engine_cfg.get("planning_horizon_index", 1)),
+        yield_temperatures=temperatures,
+        yield_thresholds=calibrated_thresholds,
     )
 
 
@@ -196,16 +235,32 @@ class PrecomputeEngine:
         context: Mapping[str, Any] | None = None,
     ) -> GateDecision:
         turn_probs = extract_turn_probs(predictions)
-        entropy = extract_entropy(predictions, turn_probs)
-        yield_index = min(self.thresholds.yield_class_index, turn_probs.numel() - 1)
-        yield_probability = float(turn_probs[yield_index])
+        yield_probs = extract_yield_probs(predictions, self.thresholds.yield_temperatures)
+        if yield_probs is not None:
+            yield_index = min(self.thresholds.commit_horizon_index, yield_probs.numel() - 1)
+            yield_probability = float(yield_probs[yield_index])
+            entropy = float(
+                entropy_from_probs(
+                    torch.stack([1.0 - yield_probs[yield_index], yield_probs[yield_index]])
+                )
+            )
+        else:
+            entropy = extract_entropy(predictions, turn_probs)
+            yield_probability = float(turn_probs[min(1, turn_probs.numel() - 1)])
 
         candidates = self.rank_candidates(predictions, context)
         branch_margin = margin([candidate.score for candidate in candidates])
         selected = candidates[0] if candidates else None
 
+        yield_threshold = self.thresholds.yield_threshold
+        if self.thresholds.yield_thresholds:
+            threshold_index = min(
+                self.thresholds.commit_horizon_index,
+                len(self.thresholds.yield_thresholds) - 1,
+            )
+            yield_threshold = self.thresholds.yield_thresholds[threshold_index]
         checks = {
-            "yield_probability": yield_probability >= self.thresholds.yield_threshold,
+            "yield_probability": yield_probability >= yield_threshold,
             "entropy": entropy <= self.thresholds.entropy_max,
             "margin": branch_margin >= self.thresholds.margin_min,
         }
@@ -222,7 +277,7 @@ class PrecomputeEngine:
             candidates=candidates,
             metadata={
                 "thresholds": {
-                    "yield_threshold": self.thresholds.yield_threshold,
+                    "yield_threshold": yield_threshold,
                     "entropy_max": self.thresholds.entropy_max,
                     "margin_min": self.thresholds.margin_min,
                     "precompute_k": self.thresholds.precompute_k,
@@ -240,7 +295,12 @@ class PrecomputeEngine:
             return [float(score) for score in scores]
 
         turn_probs = extract_turn_probs(predictions)
-        shift = float(turn_probs[min(1, turn_probs.numel() - 1)])
+        yield_probs = extract_yield_probs(predictions, self.thresholds.yield_temperatures)
+        shift = (
+            float(yield_probs[min(self.thresholds.planning_horizon_index, yield_probs.numel() - 1)])
+            if yield_probs is not None
+            else float(turn_probs[min(1, turn_probs.numel() - 1)])
+        )
         backchannel = float(turn_probs[min(2, turn_probs.numel() - 1)])
         hold = float(turn_probs[0])
         clarify = max(0.0, 1.0 - abs(shift - hold))

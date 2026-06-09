@@ -25,6 +25,8 @@ from facepred.engine.trainer import load_project_config
 from facepred.models import FacePredLoss, FacePredWorldModel
 from facepred.utils import load_trusted_torch_artifact, seed_everything
 
+EVENT_GAP_GROUP_NAMES = ("overlap", "gap_le_250ms", "gap_250_750ms", "gap_gt_750ms")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -56,7 +58,14 @@ def parse_args() -> argparse.Namespace:
         help="Imbalance correction for end-of-turn, dialog-act, and emotion targets.",
     )
     parser.add_argument("--turn-focal-gamma", type=float, default=1.5, help="Focal exponent for turn loss.")
-    parser.add_argument("--turn-loss-weight", type=float, default=2.0, help="Primary turn-loss multiplier.")
+    parser.add_argument("--turn-loss-weight", type=float, default=None, help="Override turn-event loss multiplier.")
+    parser.add_argument("--yield-loss-weight", type=float, default=None, help="Override safe-yield loss multiplier.")
+    parser.add_argument(
+        "--yield-weighting",
+        choices=["none", "balanced"],
+        default="balanced",
+        help="Positive-class weighting for the safe-yield objective.",
+    )
     parser.add_argument("--modality-dropout", type=float, default=None, help="Training-only modality dropout.")
     parser.add_argument(
         "--schedule-epochs",
@@ -90,6 +99,12 @@ def main() -> int:
     metrics_path = output_dir / "metrics.jsonl"
 
     manifest = CacheManifest.load(args.cache_dir)
+    yield_enabled = bool(model_cfg.get("heads", {}).get("yield", {}).get("enabled", False))
+    if yield_enabled and manifest.version < 2:
+        raise ValueError(
+            "Safe-yield models require cache schema v2. Rebuild the cache under "
+            "meld_audio_yield_v2 instead of reusing a v1 cache."
+        )
     batch_size = int(args.batch_size or train_cfg.get("dataloader", {}).get("batch_size", 32))
     epochs = int(args.epochs or train_cfg.get("trainer", {}).get("max_epochs", 1))
     num_workers = int(args.num_workers if args.num_workers is not None else train_cfg.get("dataloader", {}).get("num_workers", 0))
@@ -122,11 +137,22 @@ def main() -> int:
         specs=classification_weight_specs(model_cfg, args),
     )
     loss_weights = dict(train_cfg.get("loss_weights", {}))
-    loss_weights["turn_taking"] = float(args.turn_loss_weight)
+    loss_weights["turn_taking"] = float(
+        args.turn_loss_weight
+        if args.turn_loss_weight is not None
+        else loss_weights.get("turn_taking", 1.0)
+    )
+    loss_weights["yield"] = float(
+        args.yield_loss_weight
+        if args.yield_loss_weight is not None
+        else loss_weights.get("yield", 2.0)
+    )
+    yield_pos_weight = compute_yield_pos_weight(reference_train_loader, args.yield_weighting)
     loss_fn = FacePredLoss(
         loss_weights,
         class_weights=class_weights,
         focal_gammas={"turn_taking": max(0.0, float(args.turn_focal_gamma))},
+        yield_pos_weight=yield_pos_weight,
     )
     optimizer_cfg = train_cfg.get("optimizer", {})
     optimizer = torch.optim.AdamW(
@@ -206,7 +232,10 @@ def main() -> int:
                     for name, values in class_weights.items()
                 },
                 "turn_focal_gamma": args.turn_focal_gamma,
-                "turn_loss_weight": args.turn_loss_weight,
+                "turn_loss_weight": loss_weights["turn_taking"],
+                "yield_loss_weight": loss_weights["yield"],
+                "yield_weighting": args.yield_weighting,
+                "yield_pos_weight": yield_pos_weight.tolist() if yield_pos_weight is not None else None,
                 "resume": str(resume_path) if resume_path else None,
                 "output_dir": str(output_dir),
             },
@@ -688,6 +717,8 @@ def append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
 def select_best_score(val_metrics: Mapping[str, float]) -> float:
     if not val_metrics:
         return -float("inf")
+    if "yield_average_precision_mean" in val_metrics:
+        return float(val_metrics["yield_average_precision_mean"])
     if "turn_macro_f1_mean" in val_metrics:
         return float(val_metrics["turn_macro_f1_mean"])
     if "total" in val_metrics:
@@ -739,6 +770,32 @@ def classification_weight_specs(
     }
 
 
+def compute_yield_pos_weight(
+    loader: Iterable[Mapping[str, Any]],
+    mode: str,
+) -> torch.Tensor | None:
+    """Return per-horizon negative/positive ratios for BCE."""
+
+    if mode == "none":
+        return None
+    positives = None
+    negatives = None
+    for batch in loader:
+        labels = batch["targets"].get("yield")
+        if labels is None:
+            return None
+        labels = labels.long()
+        valid = labels != -100
+        if positives is None:
+            positives = torch.zeros(labels.shape[-1], dtype=torch.float64)
+            negatives = torch.zeros(labels.shape[-1], dtype=torch.float64)
+        positives += ((labels == 1) & valid).sum(dim=tuple(range(labels.ndim - 1))).double()
+        negatives += ((labels == 0) & valid).sum(dim=tuple(range(labels.ndim - 1))).double()
+    if positives is None or negatives is None:
+        return None
+    return (negatives / positives.clamp_min(1.0)).float()
+
+
 def compute_class_weights(
     loader: Iterable[Mapping[str, Any]],
     *,
@@ -757,7 +814,10 @@ def compute_class_weights(
     }
     for batch in loader:
         for component, component_counts in counts.items():
-            labels = batch["targets"][target_keys[component]].reshape(-1)
+            target = batch["targets"].get(target_keys[component])
+            if target is None:
+                continue
+            labels = target.reshape(-1)
             valid = labels != -100
             component_counts += torch.bincount(
                 labels[valid],
@@ -766,6 +826,8 @@ def compute_class_weights(
 
     result: dict[str, torch.Tensor] = {}
     for component, component_counts in counts.items():
+        if component_counts.sum() <= 0:
+            continue
         mode = specs[component][1]
         exponent = 0.5 if mode == "sqrt_inverse" else 1.0
         present = component_counts > 0
@@ -796,6 +858,8 @@ def training_semantics(
         "aux_class_weighting": args.aux_class_weighting,
         "turn_focal_gamma": args.turn_focal_gamma,
         "turn_loss_weight": args.turn_loss_weight,
+        "yield_loss_weight": args.yield_loss_weight,
+        "yield_weighting": args.yield_weighting,
         "modality_dropout": args.modality_dropout,
     }
 
@@ -930,6 +994,10 @@ class WorldMetricAccumulator:
         self.confusions: dict[str, list[torch.Tensor]] = {}
         self.entropy_sum: list[float] = []
         self.entropy_count: list[int] = []
+        self.yield_probabilities: list[list[torch.Tensor]] = []
+        self.yield_labels: list[list[torch.Tensor]] = []
+        self.yield_lead_times: list[list[torch.Tensor]] = []
+        self.yield_gap_groups: dict[tuple[int, int], tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
 
     def update(
         self,
@@ -963,6 +1031,40 @@ class WorldMetricAccumulator:
                     horizon_labels[valid],
                     logits.shape[-1],
                 )
+
+        if "yield_probs" in outputs and "yield" in targets:
+            probabilities = outputs["yield_probs"]
+            while len(self.yield_probabilities) < probabilities.shape[-1]:
+                self.yield_probabilities.append([])
+                self.yield_labels.append([])
+                self.yield_lead_times.append([])
+            for horizon_idx in range(probabilities.shape[-1]):
+                labels = labels_for_horizon(targets["yield"], horizon_idx)
+                valid = valid_for_horizon(labels, targets, mask, horizon_idx)
+                self.yield_probabilities[horizon_idx].append(
+                    probabilities[..., horizon_idx][valid].detach().float().cpu()
+                )
+                self.yield_labels[horizon_idx].append(labels[valid].detach().long().cpu())
+                if "time_to_yield_s" in targets:
+                    self.yield_lead_times[horizon_idx].append(
+                        labels_for_horizon(targets["time_to_yield_s"], horizon_idx)[valid]
+                        .detach()
+                        .float()
+                        .cpu()
+                    )
+                if "event_gap_bucket" in targets:
+                    groups = labels_for_horizon(targets["event_gap_bucket"], horizon_idx)
+                    for group_idx in range(4):
+                        grouped_valid = valid & (groups == group_idx)
+                        if grouped_valid.any():
+                            probability_chunks, label_chunks = self.yield_gap_groups.setdefault(
+                                (horizon_idx, group_idx),
+                                ([], []),
+                            )
+                            probability_chunks.append(
+                                probabilities[..., horizon_idx][grouped_valid].detach().float().cpu()
+                            )
+                            label_chunks.append(labels[grouped_valid].detach().long().cpu())
 
         if "turn_taking_entropy" in outputs and "turn_taking" in targets:
             entropy = outputs["turn_taking_entropy"]
@@ -1041,6 +1143,32 @@ class WorldMetricAccumulator:
                 sum(metrics[f"turn_entropy/h{idx}"] for idx in range(len(self.entropy_sum)))
                 / len(self.entropy_sum)
             )
+        yield_ap = []
+        for horizon_idx, chunks in enumerate(self.yield_probabilities):
+            probabilities = torch.cat(chunks) if chunks else torch.empty(0)
+            labels = torch.cat(self.yield_labels[horizon_idx]) if chunks else torch.empty(0, dtype=torch.long)
+            horizon_metrics = binary_probability_metrics(probabilities, labels)
+            for name, value in horizon_metrics.items():
+                metrics[f"yield_{name}/h{horizon_idx}"] = value
+            if self.yield_lead_times[horizon_idx]:
+                lead_times = torch.cat(self.yield_lead_times[horizon_idx])
+                true_positive = (probabilities >= 0.5) & (labels == 1) & (lead_times >= 0)
+                metrics[f"yield_prediction_lead_time_ms/h{horizon_idx}"] = (
+                    float(lead_times[true_positive].mean() * 1000.0)
+                    if true_positive.any()
+                    else 0.0
+                )
+            yield_ap.append(horizon_metrics["average_precision"])
+        if yield_ap:
+            metrics["yield_average_precision_mean"] = float(sum(yield_ap) / len(yield_ap))
+        for (horizon_idx, group_idx), (probability_chunks, label_chunks) in self.yield_gap_groups.items():
+            grouped = binary_probability_metrics(
+                torch.cat(probability_chunks),
+                torch.cat(label_chunks),
+            )
+            group_name = EVENT_GAP_GROUP_NAMES[group_idx]
+            for name, value in grouped.items():
+                metrics[f"yield_{name}/h{horizon_idx}/{group_name}"] = value
         return metrics
 
     def report(self) -> dict[str, Any]:
@@ -1073,6 +1201,70 @@ def metrics_from_confusion(matrix: torch.Tensor) -> tuple[float, float]:
     fn = matrix.sum(dim=1) - tp
     f1 = 2 * tp / (2 * tp + fp + fn).clamp_min(1.0)
     return accuracy, float(f1.mean())
+
+
+def binary_probability_metrics(
+    probabilities: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    threshold: float = 0.5,
+    ece_bins: int = 15,
+) -> dict[str, float]:
+    """Corpus-level safe-yield metrics without third-party dependencies."""
+
+    probabilities = probabilities.float().flatten()
+    labels = labels.long().flatten()
+    if labels.numel() == 0:
+        return {
+            "average_precision": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "brier": 0.0,
+            "ece": 0.0,
+            "prevalence": 0.0,
+            "false_commit_rate": 0.0,
+            "late_response_rate": 0.0,
+        }
+    positives = labels == 1
+    predictions = probabilities >= threshold
+    tp = int((predictions & positives).sum())
+    fp = int((predictions & ~positives).sum())
+    fn = int((~predictions & positives).sum())
+    precision = tp / max(1, tp + fp)
+    recall = tp / max(1, tp + fn)
+    average_precision = 0.0
+    previous_recall = 0.0
+    for candidate in torch.unique(probabilities).sort(descending=True).values:
+        candidate_predictions = probabilities >= candidate
+        candidate_tp = int((candidate_predictions & positives).sum())
+        candidate_fp = int((candidate_predictions & ~positives).sum())
+        candidate_precision = candidate_tp / max(1, candidate_tp + candidate_fp)
+        candidate_recall = candidate_tp / max(1, int(positives.sum()))
+        average_precision += (candidate_recall - previous_recall) * candidate_precision
+        previous_recall = candidate_recall
+    ece = 0.0
+    for bin_idx in range(ece_bins):
+        lower = bin_idx / ece_bins
+        upper = (bin_idx + 1) / ece_bins
+        in_bin = (probabilities >= lower) & (
+            probabilities <= upper if bin_idx == ece_bins - 1 else probabilities < upper
+        )
+        if in_bin.any():
+            ece += float(in_bin.float().mean()) * abs(
+                float(labels[in_bin].float().mean()) - float(probabilities[in_bin].mean())
+            )
+    return {
+        "average_precision": float(average_precision),
+        "precision": precision,
+        "recall": recall,
+        "f1": 2 * precision * recall / max(1.0e-12, precision + recall),
+        "brier": float((probabilities - labels.float()).square().mean()),
+        "ece": ece,
+        "prevalence": float(positives.float().mean()),
+        "false_commit_rate": fp / max(1, tp + fp),
+        "late_response_rate": fn / max(1, tp + fn),
+    }
 
 
 if __name__ == "__main__":

@@ -88,6 +88,8 @@ class FacePredPipeline:
             feature_tensor = coerce_feature_tensor(features, self.config.feature_dim).to(self.device)
             outputs = self.model({"features": feature_tensor})
         predictions = dict(outputs)
+        if "yield_probs" not in predictions and "yield_logits" in predictions:
+            predictions["yield_probs"] = torch.sigmoid(predictions["yield_logits"])
         if "turn_probs" not in predictions and "turn_logits" in predictions:
             predictions["turn_probs"] = predictions["turn_logits"].softmax(dim=-1)
         if "turn_probs" not in predictions and "turn_taking_logits" in predictions:

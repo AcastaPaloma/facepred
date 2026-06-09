@@ -12,6 +12,7 @@ from facepred.data.augmentations import (
 )
 from facepred.data.cached import (
     CACHE_VERSION,
+    SUPPORTED_CACHE_VERSIONS,
     CachedSequenceDataset,
     CacheManifest,
     CacheShard,
@@ -67,6 +68,7 @@ __all__ = [
     "AdditiveGaussianNoise",
     "AugmentationResult",
     "CACHE_VERSION",
+    "SUPPORTED_CACHE_VERSIONS",
     "CacheManifest",
     "CacheShard",
     "CachedSequenceDataset",

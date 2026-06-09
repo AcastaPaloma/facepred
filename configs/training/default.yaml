@@ -45,6 +45,7 @@ dataloader:
 loss_weights:
   rssm_dynamics: 1.0       # KL(posterior || prior) + state prediction
   turn_taking: 1.0          # Hold/shift/BC/overlap classification
+  yield: 2.0                # Safe shift within each prediction horizon
   end_of_turn: 0.5          # Time-to-yield regression + buckets
   dialog_act: 0.5           # Dialog act classification
   affect: 0.3               # Valence/arousal + emotion

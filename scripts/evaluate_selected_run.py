@@ -42,7 +42,18 @@ def main() -> int:
         ],
         check=True,
     )
-    print(json.dumps({"run_dir": str(run_dir), "checkpoint": str(checkpoint), "output": str(output)}, indent=2))
+    calibration = selection.get("yield_calibration")
+    print(
+        json.dumps(
+            {
+                "run_dir": str(run_dir),
+                "checkpoint": str(checkpoint),
+                "output": str(output),
+                "yield_calibration": calibration,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
