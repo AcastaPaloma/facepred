@@ -25,24 +25,24 @@ def main() -> int:
     run_dir = Path(selection["final"]["run_dir"])
     checkpoint = run_dir / "checkpoints" / "best.pt"
     output = run_dir / f"{args.split}_metrics.json"
-    subprocess.run(
-        [
-            sys.executable,
-            "scripts/evaluate_world_model.py",
-            "--cache-dir",
-            args.cache_dir,
-            "--checkpoint",
-            str(checkpoint),
-            "--split",
-            args.split,
-            "--device",
-            args.device,
-            "--output",
-            str(output),
-        ],
-        check=True,
-    )
     calibration = selection.get("yield_calibration")
+    command = [
+        sys.executable,
+        "scripts/evaluate_world_model.py",
+        "--cache-dir",
+        args.cache_dir,
+        "--checkpoint",
+        str(checkpoint),
+        "--split",
+        args.split,
+        "--device",
+        args.device,
+        "--output",
+        str(output),
+    ]
+    if calibration:
+        command.extend(["--calibration", calibration])
+    subprocess.run(command, check=True)
     print(
         json.dumps(
             {

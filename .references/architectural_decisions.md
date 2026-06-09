@@ -65,6 +65,30 @@ Full VAP and visual fusion remain follow-up experiments on continuous dyadic
 conversation data. MELD does not provide the separated continuous speaker
 channels required for an honest VAP objective.
 
+### Campaign 4 Amendment: Yield Imbalance And Safe Abstention
+
+The completed campaign v3 showed that architecture changes were not the main
+constraint: GRU-S concat, cross-attention, and weighting variants had very
+similar dev AP, while the selected model could not satisfy the requested
+precision policy at useful coverage. Campaign v4 therefore fixes architecture
+and isolates training distribution and operating-point behavior.
+
+| Decision | Campaign v4 choice |
+|---|---|
+| Architecture | Deterministic GRU-S with concat fusion |
+| Cache | Reuse corrected schema-v2 five-second cache |
+| Primary comparison | Unweighted, square-root, and capped-at-3 yield BCE |
+| Sampling ablation | Natural versus event-balanced training windows |
+| Event sampling mass | 50% background, 25% non-yield event, 25% safe-yield |
+| Selection | Mean dev safe-yield average precision |
+| Deployment policy | At least 90% dev precision and 25 dev commits |
+| Infeasible policy | Explicit abstention; never silently lower precision |
+| Evaluation | Apply dev temperatures and thresholds to final test metrics |
+
+Longer context and richer causal prosody remain important, literature-supported
+ablations, but they are deferred because changing them in v4 would confound the
+imbalance/sampling comparison. See [`docs/campaign_v4.md`](../docs/campaign_v4.md).
+
 ---
 
 ## World Model Architecture

@@ -1,4 +1,4 @@
-"""Run a small successive-halving sweep, then continue the winner to a long run."""
+"""Run the focused v4 safe-yield imbalance/sampling campaign."""
 
 from __future__ import annotations
 
@@ -9,22 +9,40 @@ import sys
 from pathlib import Path
 from typing import Any
 
-CANDIDATES = (
-    {"name": "gru_xs_concat_lr3e4", "model": "configs/model/gru_xs_audio_yield.yaml", "lr": "3e-4"},
-    {"name": "gru_s_concat_lr1e4", "model": "configs/model/gru_s_audio_yield.yaml", "lr": "1e-4"},
-    {"name": "gru_s_concat_lr3e4", "model": "configs/model/gru_s_audio_yield.yaml", "lr": "3e-4"},
+CANDIDATES: tuple[dict[str, Any], ...] = (
     {
-        "name": "gru_s_cross_attention_lr3e4",
-        "model": "configs/model/gru_s_audio_yield.yaml",
-        "lr": "3e-4",
-        "fusion": "cross_attention",
-    },
-    {"name": "rssm_s_concat_lr3e4", "model": "configs/model/rssm_s_audio_yield.yaml", "lr": "3e-4"},
-    {
-        "name": "gru_s_concat_lr3e4_unweighted",
+        "name": "gru_s_concat_unweighted",
         "model": "configs/model/gru_s_audio_yield.yaml",
         "lr": "3e-4",
         "yield_weighting": "none",
+    },
+    {
+        "name": "gru_s_concat_sqrt_weight",
+        "model": "configs/model/gru_s_audio_yield.yaml",
+        "lr": "3e-4",
+        "yield_weighting": "sqrt_balanced",
+    },
+    {
+        "name": "gru_s_concat_cap3_weight",
+        "model": "configs/model/gru_s_audio_yield.yaml",
+        "lr": "3e-4",
+        "yield_weighting": "capped_balanced",
+        "yield_pos_weight_cap": 3.0,
+    },
+    {
+        "name": "gru_s_concat_event_balanced_unweighted",
+        "model": "configs/model/gru_s_audio_yield.yaml",
+        "lr": "3e-4",
+        "yield_weighting": "none",
+        "train_sampling": "event_balanced",
+    },
+    {
+        "name": "gru_s_concat_event_balanced_cap3",
+        "model": "configs/model/gru_s_audio_yield.yaml",
+        "lr": "3e-4",
+        "yield_weighting": "capped_balanced",
+        "yield_pos_weight_cap": 3.0,
+        "train_sampling": "event_balanced",
     },
 )
 
@@ -38,9 +56,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--stage1-epochs", type=int, default=5)
     parser.add_argument("--stage2-epochs", type=int, default=15)
-    parser.add_argument("--max-epochs", type=int, default=50)
+    parser.add_argument("--max-epochs", type=int, default=40)
     parser.add_argument("--save-every-steps", type=int, default=100)
     parser.add_argument("--early-stopping-patience", type=int, default=12)
+    parser.add_argument("--minimum-calibration-commits", type=int, default=25)
     parser.add_argument(
         "--minimum-stage1-improvement",
         type=float,
@@ -98,6 +117,8 @@ def main() -> int:
             "dev",
             "--device",
             args.device,
+            "--minimum-commits",
+            str(args.minimum_calibration_commits),
             "--output",
             str(calibration_path),
         ],
@@ -105,7 +126,12 @@ def main() -> int:
     )
 
     selection = {
+        "campaign_version": 4,
         "strategy": "successive_halving",
+        "controlled_variables": [
+            "yield_positive_weighting",
+            "event_balanced_window_sampling",
+        ],
         "stage1": stage1,
         "stage2": stage2,
         "winner": winner,
@@ -129,7 +155,7 @@ def run_stage(
 
 
 def run_candidate(
-    candidate: dict[str, str],
+    candidate: dict[str, Any],
     epochs: int,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
@@ -174,7 +200,11 @@ def run_candidate(
         "--yield-loss-weight",
         "2.0",
         "--yield-weighting",
-        candidate.get("yield_weighting", "balanced"),
+        str(candidate.get("yield_weighting", "none")),
+        "--yield-pos-weight-cap",
+        str(candidate.get("yield_pos_weight_cap", 3.0)),
+        "--train-sampling",
+        str(candidate.get("train_sampling", "natural")),
         "--modality-dropout",
         "0.05",
         "--schedule-epochs",

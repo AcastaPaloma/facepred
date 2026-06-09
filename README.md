@@ -68,9 +68,10 @@ python scripts/demo.py
 
 The iteration-0 tensor contracts remain available for CPU smoke testing. The
 repository now also includes a resumable real-MELD audio campaign for Colab
-Free. Campaign v3 uses cache schema v2, safe-yield average precision for model
-selection, a silence endpointing baseline, and calibrated commit thresholds.
-Visual extraction remains the next major ablation.
+Free. Campaign v4 reuses cache schema v2 and keeps the deterministic GRU-S
+architecture fixed while testing mild yield weighting and event-balanced
+training-window sampling. Calibration now explicitly abstains when the requested
+precision/coverage policy is infeasible. See [`docs/campaign_v4.md`](docs/campaign_v4.md).
 
 See [`task.md`](task.md) for the current build tracker.
 

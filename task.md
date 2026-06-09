@@ -61,3 +61,10 @@
 - [x] Yield AP, calibration, false-commit, late-response, lead-time, and gap metrics
 - [x] Silence-threshold endpointing baseline and dev calibration artifact
 - [x] Campaign-v3 Colab notebook and runbook
+
+## Phase 9: Focused Yield Operating-Point Campaign
+- [x] Mild square-root and capped safe-yield positive weighting
+- [x] Event-balanced background, non-yield-event, and yield-window sampling
+- [x] Explicit calibration infeasibility and conservative abstention
+- [x] Calibrated selected-run evaluation with commit-count diagnostics
+- [x] Campaign-v4 literature review, architecture amendment, and Colab runbook

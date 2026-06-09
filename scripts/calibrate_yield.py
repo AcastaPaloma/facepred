@@ -28,6 +28,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--minimum-precision", type=float, default=0.9)
+    parser.add_argument(
+        "--minimum-commits",
+        type=int,
+        default=25,
+        help="Minimum dev commits required for a deployable threshold.",
+    )
     parser.add_argument("--output", required=True)
     return parser.parse_args()
 
@@ -54,21 +60,25 @@ def main() -> int:
     temperatures = []
     thresholds = []
     metrics = []
+    policy_results = []
     for horizon_idx, horizon_logits in enumerate(logits):
         horizon_labels = labels[horizon_idx]
         temperature = fit_temperature(horizon_logits, horizon_labels)
         probabilities = torch.sigmoid(horizon_logits / temperature)
-        threshold = threshold_for_minimum_precision(
+        policy = select_threshold_for_minimum_precision(
             probabilities,
             horizon_labels,
             args.minimum_precision,
+            minimum_commits=args.minimum_commits,
         )
+        threshold = float(policy["threshold"])
         temperatures.append(temperature)
         thresholds.append(threshold)
         metrics.append(binary_probability_metrics(probabilities, horizon_labels, threshold=threshold))
+        policy_results.append(policy)
 
     artifact = {
-        "schema_version": 1,
+        "schema_version": 2,
         "type": "safe_yield_temperature_thresholds",
         "checkpoint": str(args.checkpoint),
         "split": args.split,
@@ -76,7 +86,9 @@ def main() -> int:
         "temperatures": temperatures,
         "thresholds": thresholds,
         "minimum_precision": args.minimum_precision,
-        "selection_policy": "maximize_recall_at_minimum_precision",
+        "minimum_commits": args.minimum_commits,
+        "selection_policy": "maximize_recall_at_minimum_precision_or_abstain",
+        "policy_results": policy_results,
         "metrics": metrics,
     }
     output = Path(args.output)
@@ -127,22 +139,66 @@ def threshold_for_minimum_precision(
     labels: torch.Tensor,
     minimum_precision: float,
 ) -> float:
+    """Compatibility wrapper returning only the selected threshold."""
+
+    return float(
+        select_threshold_for_minimum_precision(
+            probabilities,
+            labels,
+            minimum_precision,
+            minimum_commits=1,
+        )["threshold"]
+    )
+
+
+def select_threshold_for_minimum_precision(
+    probabilities: torch.Tensor,
+    labels: torch.Tensor,
+    minimum_precision: float,
+    *,
+    minimum_commits: int,
+) -> dict[str, float | int | bool | str]:
+    """Maximize recall under a precision/coverage constraint, otherwise abstain."""
+
+    probabilities = probabilities.float().flatten()
+    labels = labels.long().flatten()
     candidates = torch.unique(probabilities).sort(descending=True).values
-    viable: list[tuple[float, float]] = []
-    fallback: list[tuple[float, float, float]] = []
+    viable: list[tuple[float, float, int, float]] = []
+    fallback: list[tuple[float, float, int, float]] = []
     for threshold in candidates:
         predicted = probabilities >= threshold
         tp = int((predicted & (labels == 1)).sum())
         fp = int((predicted & (labels == 0)).sum())
         fn = int((~predicted & (labels == 1)).sum())
+        commits = tp + fp
         precision = tp / max(1, tp + fp)
         recall = tp / max(1, tp + fn)
-        fallback.append((precision, recall, float(threshold)))
-        if precision >= minimum_precision:
-            viable.append((recall, float(threshold)))
+        fallback.append((precision, recall, commits, float(threshold)))
+        if precision >= minimum_precision and commits >= minimum_commits:
+            viable.append((recall, precision, commits, float(threshold)))
     if viable:
-        return max(viable)[1]
-    return max(fallback)[2] if fallback else 1.0
+        recall, precision, commits, threshold = max(viable)
+        return {
+            "status": "satisfied",
+            "policy_satisfied": True,
+            "threshold": threshold,
+            "precision": precision,
+            "recall": recall,
+            "commits": commits,
+        }
+    best = max(fallback) if fallback else (0.0, 0.0, 0, 1.0)
+    return {
+        "status": "infeasible_abstain",
+        "policy_satisfied": False,
+        "threshold": 1.000001,
+        "precision": 0.0,
+        "recall": 0.0,
+        "commits": 0,
+        "best_available_precision": best[0],
+        "best_available_recall": best[1],
+        "best_available_commits": best[2],
+        "best_available_threshold": best[3],
+    }
 
 
 if __name__ == "__main__":

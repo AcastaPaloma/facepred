@@ -32,6 +32,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", help="auto | cpu | cuda.")
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers.")
     parser.add_argument("--max-batches", type=int, default=None, help="Debug limit.")
+    parser.add_argument(
+        "--calibration",
+        default=None,
+        help="Optional dev-fitted yield calibration artifact.",
+    )
     parser.add_argument("--output", default=None, help="Optional JSON metrics output.")
     return parser.parse_args()
 
@@ -53,6 +58,11 @@ def main() -> int:
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
     )
+    calibration = (
+        json.loads(Path(args.calibration).read_text(encoding="utf-8"))
+        if args.calibration
+        else None
+    )
 
     metrics, report = evaluate(
         model=model,
@@ -60,12 +70,14 @@ def main() -> int:
         loss_fn=loss_fn,
         device=device,
         max_batches=args.max_batches,
+        calibration=calibration,
     )
     payload = {
         "checkpoint": str(args.checkpoint),
         "split": args.split,
         "num_batches": min(len(loader), args.max_batches) if args.max_batches else len(loader),
         "metrics": metrics,
+        "yield_calibration": args.calibration,
         "confusion_matrices": report["confusion_matrices"],
     }
     if args.output:
@@ -85,15 +97,20 @@ def evaluate(
     loss_fn: FacePredLoss,
     device: torch.device,
     max_batches: int | None,
+    calibration: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     model.eval()
     accumulator = MetricAccumulator()
-    world_accumulator = WorldMetricAccumulator()
+    world_accumulator = WorldMetricAccumulator(
+        calibration.get("thresholds", ()) if calibration else ()
+    )
     for batch_idx, batch in enumerate(loader):
         if max_batches is not None and batch_idx >= max_batches:
             break
         features, targets = move_training_batch(batch, device)
         outputs = model(features)
+        if calibration:
+            outputs = apply_yield_calibration(outputs, calibration)
         loss_output = loss_fn(outputs, targets)
         accumulator.update(loss_output.metrics())
         world_accumulator.update(outputs, targets)
@@ -101,6 +118,35 @@ def evaluate(
     metrics = accumulator.mean()
     metrics.update(report["metrics"])
     return metrics, report
+
+
+def apply_yield_calibration(
+    outputs: Mapping[str, torch.Tensor],
+    calibration: Mapping[str, Any],
+) -> dict[str, torch.Tensor]:
+    """Apply dev-fitted per-horizon temperatures before operating-point metrics."""
+
+    result = dict(outputs)
+    logits = result.get("yield_logits")
+    if logits is None:
+        return result
+    temperatures = tuple(float(value) for value in calibration.get("temperatures", ()))
+    if len(temperatures) != logits.shape[-1]:
+        raise ValueError(
+            f"Calibration has {len(temperatures)} temperatures for {logits.shape[-1]} horizons"
+        )
+    temperature_tensor = torch.tensor(
+        temperatures,
+        dtype=logits.dtype,
+        device=logits.device,
+    ).clamp_min(1.0e-6)
+    result["yield_probs"] = torch.sigmoid(logits / temperature_tensor)
+    result["yield_entropy"] = -(
+        result["yield_probs"] * result["yield_probs"].clamp_min(1.0e-8).log()
+        + (1.0 - result["yield_probs"])
+        * (1.0 - result["yield_probs"]).clamp_min(1.0e-8).log()
+    )
+    return result
 
 
 def resolve_device(value: str) -> torch.device:

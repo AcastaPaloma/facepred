@@ -62,9 +62,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yield-loss-weight", type=float, default=None, help="Override safe-yield loss multiplier.")
     parser.add_argument(
         "--yield-weighting",
-        choices=["none", "balanced"],
+        choices=["none", "sqrt_balanced", "capped_balanced", "balanced"],
         default="balanced",
         help="Positive-class weighting for the safe-yield objective.",
+    )
+    parser.add_argument(
+        "--yield-pos-weight-cap",
+        type=float,
+        default=3.0,
+        help="Per-horizon cap used by --yield-weighting capped_balanced.",
+    )
+    parser.add_argument(
+        "--train-sampling",
+        choices=["natural", "event_balanced"],
+        default="natural",
+        help="Window sampling policy for the training split.",
+    )
+    parser.add_argument(
+        "--event-sampling-fractions",
+        default="0.5,0.25,0.25",
+        help="Target background, non-yield-event, and yield-event window fractions.",
     )
     parser.add_argument("--modality-dropout", type=float, default=None, help="Training-only modality dropout.")
     parser.add_argument(
@@ -147,7 +164,12 @@ def main() -> int:
         if args.yield_loss_weight is not None
         else loss_weights.get("yield", 2.0)
     )
-    yield_pos_weight = compute_yield_pos_weight(reference_train_loader, args.yield_weighting)
+    yield_pos_weight = compute_yield_pos_weight(
+        reference_train_loader,
+        args.yield_weighting,
+        cap=args.yield_pos_weight_cap,
+    )
+    event_sampling_fractions = parse_event_sampling_fractions(args.event_sampling_fractions)
     loss_fn = FacePredLoss(
         loss_weights,
         class_weights=class_weights,
@@ -236,6 +258,8 @@ def main() -> int:
                 "yield_loss_weight": loss_weights["yield"],
                 "yield_weighting": args.yield_weighting,
                 "yield_pos_weight": yield_pos_weight.tolist() if yield_pos_weight is not None else None,
+                "train_sampling": args.train_sampling,
+                "event_sampling_fractions": event_sampling_fractions,
                 "resume": str(resume_path) if resume_path else None,
                 "output_dir": str(output_dir),
             },
@@ -257,6 +281,8 @@ def main() -> int:
             pin_memory=pin_memory,
             drop_last=False,
             generator=torch.Generator().manual_seed(args.seed + epoch),
+            sampling=args.train_sampling,
+            event_sampling_fractions=event_sampling_fractions,
         )
         train_metrics, global_step = train_one_epoch(
             model=model,
@@ -773,8 +799,10 @@ def classification_weight_specs(
 def compute_yield_pos_weight(
     loader: Iterable[Mapping[str, Any]],
     mode: str,
+    *,
+    cap: float = 3.0,
 ) -> torch.Tensor | None:
-    """Return per-horizon negative/positive ratios for BCE."""
+    """Return a controlled per-horizon positive weight for BCE."""
 
     if mode == "none":
         return None
@@ -793,7 +821,31 @@ def compute_yield_pos_weight(
         negatives += ((labels == 0) & valid).sum(dim=tuple(range(labels.ndim - 1))).double()
     if positives is None or negatives is None:
         return None
-    return (negatives / positives.clamp_min(1.0)).float()
+    ratios = negatives / positives.clamp_min(1.0)
+    if mode == "sqrt_balanced":
+        ratios = ratios.sqrt()
+    elif mode == "capped_balanced":
+        if cap <= 0.0:
+            raise ValueError("yield positive-weight cap must be positive")
+        ratios = ratios.clamp_max(float(cap))
+    elif mode != "balanced":
+        raise ValueError(f"Unknown yield weighting mode: {mode!r}")
+    return ratios.float()
+
+
+def parse_event_sampling_fractions(value: str) -> tuple[float, float, float]:
+    """Parse background,event,yield target fractions from the CLI."""
+
+    try:
+        fractions = tuple(float(item.strip()) for item in value.split(","))
+    except ValueError as exc:
+        raise ValueError("event sampling fractions must be comma-separated numbers") from exc
+    if len(fractions) != 3 or any(item < 0.0 for item in fractions) or sum(fractions) <= 0.0:
+        raise ValueError(
+            "event sampling fractions must be three non-negative values with a positive sum"
+        )
+    total = sum(fractions)
+    return tuple(item / total for item in fractions)
 
 
 def compute_class_weights(
@@ -860,6 +912,9 @@ def training_semantics(
         "turn_loss_weight": args.turn_loss_weight,
         "yield_loss_weight": args.yield_loss_weight,
         "yield_weighting": args.yield_weighting,
+        "yield_pos_weight_cap": args.yield_pos_weight_cap,
+        "train_sampling": args.train_sampling,
+        "event_sampling_fractions": args.event_sampling_fractions,
         "modality_dropout": args.modality_dropout,
     }
 
@@ -990,7 +1045,7 @@ class MetricAccumulator:
 class WorldMetricAccumulator:
     """Accumulate corpus-level classification metrics across batches."""
 
-    def __init__(self) -> None:
+    def __init__(self, yield_thresholds: Iterable[float] | None = None) -> None:
         self.confusions: dict[str, list[torch.Tensor]] = {}
         self.entropy_sum: list[float] = []
         self.entropy_count: list[int] = []
@@ -998,6 +1053,7 @@ class WorldMetricAccumulator:
         self.yield_labels: list[list[torch.Tensor]] = []
         self.yield_lead_times: list[list[torch.Tensor]] = []
         self.yield_gap_groups: dict[tuple[int, int], tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
+        self.yield_thresholds = tuple(float(value) for value in (yield_thresholds or ()))
 
     def update(
         self,
@@ -1147,12 +1203,18 @@ class WorldMetricAccumulator:
         for horizon_idx, chunks in enumerate(self.yield_probabilities):
             probabilities = torch.cat(chunks) if chunks else torch.empty(0)
             labels = torch.cat(self.yield_labels[horizon_idx]) if chunks else torch.empty(0, dtype=torch.long)
-            horizon_metrics = binary_probability_metrics(probabilities, labels)
+            threshold = (
+                self.yield_thresholds[horizon_idx]
+                if horizon_idx < len(self.yield_thresholds)
+                else 0.5
+            )
+            horizon_metrics = binary_probability_metrics(probabilities, labels, threshold=threshold)
+            metrics[f"yield_operating_threshold/h{horizon_idx}"] = threshold
             for name, value in horizon_metrics.items():
                 metrics[f"yield_{name}/h{horizon_idx}"] = value
             if self.yield_lead_times[horizon_idx]:
                 lead_times = torch.cat(self.yield_lead_times[horizon_idx])
-                true_positive = (probabilities >= 0.5) & (labels == 1) & (lead_times >= 0)
+                true_positive = (probabilities >= threshold) & (labels == 1) & (lead_times >= 0)
                 metrics[f"yield_prediction_lead_time_ms/h{horizon_idx}"] = (
                     float(lead_times[true_positive].mean() * 1000.0)
                     if true_positive.any()
@@ -1165,6 +1227,11 @@ class WorldMetricAccumulator:
             grouped = binary_probability_metrics(
                 torch.cat(probability_chunks),
                 torch.cat(label_chunks),
+                threshold=(
+                    self.yield_thresholds[horizon_idx]
+                    if horizon_idx < len(self.yield_thresholds)
+                    else 0.5
+                ),
             )
             group_name = EVENT_GAP_GROUP_NAMES[group_idx]
             for name, value in grouped.items():
@@ -1225,6 +1292,9 @@ def binary_probability_metrics(
             "prevalence": 0.0,
             "false_commit_rate": 0.0,
             "late_response_rate": 0.0,
+            "commits": 0.0,
+            "positives": 0.0,
+            "examples": 0.0,
         }
     positives = labels == 1
     predictions = probabilities >= threshold
@@ -1264,6 +1334,9 @@ def binary_probability_metrics(
         "prevalence": float(positives.float().mean()),
         "false_commit_rate": fp / max(1, tp + fp),
         "late_response_rate": fn / max(1, tp + fn),
+        "commits": float(tp + fp),
+        "positives": float(positives.sum()),
+        "examples": float(labels.numel()),
     }
 
 

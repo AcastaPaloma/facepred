@@ -1,4 +1,4 @@
-# Colab Free Real-Training Runbook
+# Colab Real-Training Runbook
 
 ## Classification
 
@@ -32,7 +32,7 @@ MyDrive/facepred/
     train/*.pt
     dev/*.pt
     test/*.pt
-  runs/audio_campaign_v3/
+  runs/audio_campaign_v4/
     selection.json
     silence_baseline.json
     <candidate>/
@@ -156,29 +156,29 @@ Training reads the cache from local runtime disk and writes checkpoints to Drive
 
 ## 5. Tune Then Train
 
-Keep earlier campaign artifacts for historical comparison. Campaign v3 requires
-the rebuilt `meld_audio_yield_v2` cache because target semantics and VAD
-normalization changed.
+Keep earlier campaign artifacts for historical comparison. Campaign v4 reuses
+the corrected `meld_audio_yield_v2` cache and isolates imbalance treatment and
+training-window sampling. It does not require another cache rebuild.
 
 ```bash
 python scripts/tune_and_train_colab.py \
   --cache-dir /content/facepred_cache \
-  --output-root /content/drive/MyDrive/facepred/runs/audio_campaign_v3 \
+  --output-root /content/drive/MyDrive/facepred/runs/audio_campaign_v4 \
   --device cuda \
   --batch-size 32 \
   --stage1-epochs 5 \
   --stage2-epochs 15 \
-  --max-epochs 50 \
+  --max-epochs 40 \
   --save-every-steps 100 \
   --early-stopping-patience 12
 ```
 
-The sweep compares deterministic GRU capacity and learning rate, concat versus
-cross-attention fusion, deterministic versus stochastic state, and balanced
-versus unweighted safe-yield loss. All candidates use the same corrected cache.
+The sweep keeps deterministic GRU-S, concat fusion, learning rate, cache, and
+seed fixed. It compares unweighted, square-root, and capped safe-yield weighting
+with natural and event-balanced training-window sampling.
 
-The six candidates train for five epochs. The top three continue to fifteen.
-The winner continues toward 50 epochs with early stopping.
+The five candidates train for five epochs. The top three continue to fifteen.
+The winner continues toward 40 epochs with early stopping.
 
 Rerunning the same command is the recovery procedure. Completed candidates and
 epochs are resumed rather than restarted.
@@ -189,7 +189,9 @@ Brier score, ECE, false commits, late responses, prediction lead time,
 floor-transfer-gap groups, sparse event confusion matrices, and prevalence.
 Candidates that do not beat prevalence AP by `0.02` stop before continuation.
 After selecting the winner, `yield_calibration.json` is fitted on dev at a
-minimum precision of 90%.
+minimum precision of 90% and minimum coverage of 25 dev commits. If that policy
+is infeasible, the artifact explicitly abstains instead of silently accepting a
+lower-precision threshold. See [`campaign_v4.md`](campaign_v4.md) for rationale.
 
 ## 6. Evaluate The Selected Winner
 
@@ -197,14 +199,15 @@ Only after tuning and long training complete:
 
 ```bash
 python scripts/evaluate_selected_run.py \
-  --selection /content/drive/MyDrive/facepred/runs/audio_campaign_v3/selection.json \
+  --selection /content/drive/MyDrive/facepred/runs/audio_campaign_v4/selection.json \
   --cache-dir /content/facepred_cache \
   --split test \
   --device cuda
 ```
 
-The resulting JSON includes safe-yield metrics, lead-time and gap diagnostics,
-auxiliary event confusion matrices, and the path to the dev calibration artifact.
+The resulting JSON applies the dev-fitted temperatures and operating thresholds,
+then includes safe-yield metrics, commit counts, lead-time and gap diagnostics,
+auxiliary event confusion matrices, and the calibration artifact path.
 
 ## Recovery Cell
 
@@ -223,7 +226,7 @@ rsync -a --exclude '.progress/' /content/drive/MyDrive/facepred/cache/meld_audio
 python scripts/inspect_training_cache.py --cache-dir /content/facepred_cache --split dev
 python scripts/tune_and_train_colab.py \
   --cache-dir /content/facepred_cache \
-  --output-root /content/drive/MyDrive/facepred/runs/audio_campaign_v3 \
+  --output-root /content/drive/MyDrive/facepred/runs/audio_campaign_v4 \
   --device cuda --batch-size 32 --stage1-epochs 5 --stage2-epochs 15 \
-  --max-epochs 50 --save-every-steps 100 --early-stopping-patience 12
+  --max-epochs 40 --save-every-steps 100 --early-stopping-patience 12
 ```

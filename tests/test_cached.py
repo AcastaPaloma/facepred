@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 import torch
 
 from facepred.data import (
@@ -8,6 +9,7 @@ from facepred.data import (
     CachedSequenceDataset,
     CacheShard,
     collate_cached_sequences,
+    event_balanced_sample_weights,
     save_cache_shard,
     write_cache_manifest,
 )
@@ -110,6 +112,30 @@ def test_cache_v1_manifest_remains_loadable(tmp_path) -> None:
     )
 
     assert CacheManifest.load(tmp_path).version == 1
+
+
+def test_event_balanced_weights_allocate_mass_by_window_group() -> None:
+    def sample(yield_value: int, turn_value: int) -> dict[str, object]:
+        return {
+            "targets": {
+                "yield": torch.tensor([[yield_value]]),
+                "turn_taking": torch.tensor([[turn_value]]),
+                "horizon_mask": torch.ones(1, 1, dtype=torch.bool),
+            },
+            "mask": torch.ones(1, dtype=torch.bool),
+        }
+
+    dataset = [
+        sample(0, 0),
+        sample(0, 0),
+        sample(0, 2),
+        sample(1, 1),
+    ]
+    weights = event_balanced_sample_weights(dataset, (0.5, 0.25, 0.25))
+
+    assert weights[:2].sum() == pytest.approx(0.5)
+    assert weights[2] == pytest.approx(0.25)
+    assert weights[3] == pytest.approx(0.25)
 
 
 def test_world_metrics_expose_majority_collapse() -> None:

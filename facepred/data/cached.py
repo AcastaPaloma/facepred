@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from facepred.utils import load_trusted_torch_artifact
 
@@ -245,21 +245,91 @@ def make_cached_dataloader(
     drop_last: bool = False,
     load_to_memory: bool = True,
     generator: torch.Generator | None = None,
+    sampling: str = "natural",
+    event_sampling_fractions: Sequence[float] = (0.5, 0.25, 0.25),
 ) -> DataLoader:
     """Build a DataLoader for one cached split."""
     dataset = CachedSequenceDataset(cache_dir, split=split, load_to_memory=load_to_memory)
     if shuffle is None:
         shuffle = split == "train"
+    sampler = None
+    if sampling == "event_balanced":
+        sampler = WeightedRandomSampler(
+            event_balanced_sample_weights(dataset, event_sampling_fractions),
+            num_samples=len(dataset),
+            replacement=True,
+            generator=generator,
+        )
+        shuffle = False
+    elif sampling != "natural":
+        raise ValueError(f"Unknown cached-data sampling mode: {sampling!r}")
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=drop_last,
         collate_fn=collate_cached_sequences,
         generator=generator,
     )
+
+
+def event_balanced_sample_weights(
+    dataset: Dataset,
+    target_fractions: Sequence[float] = (0.5, 0.25, 0.25),
+) -> torch.Tensor:
+    """Weight background, non-yield-event, and yield-event windows separately."""
+
+    if len(target_fractions) != 3 or any(float(value) < 0.0 for value in target_fractions):
+        raise ValueError("event sampling fractions must contain three non-negative values")
+    total = sum(float(value) for value in target_fractions)
+    if total <= 0.0:
+        raise ValueError("event sampling fractions must have a positive sum")
+    fractions = torch.tensor(target_fractions, dtype=torch.float64) / total
+
+    groups = torch.tensor(
+        [_event_sampling_group(dataset[index]) for index in range(len(dataset))],
+        dtype=torch.long,
+    )
+    counts = torch.bincount(groups, minlength=3).double()
+    active = counts > 0
+    if not active.any():
+        raise ValueError("Cannot event-balance an empty dataset")
+    fractions[~active] = 0.0
+    fractions /= fractions.sum().clamp_min(1.0e-12)
+    group_weights = torch.zeros(3, dtype=torch.float64)
+    group_weights[active] = fractions[active] / counts[active]
+    return group_weights[groups]
+
+
+def _event_sampling_group(sample: Mapping[str, Any]) -> int:
+    """Return 0=background, 1=non-yield event, or 2=safe-yield event."""
+
+    targets = sample["targets"]
+    mask = sample["mask"].bool()
+    yield_labels = targets.get("yield")
+    if yield_labels is not None:
+        valid = mask.unsqueeze(-1) & (yield_labels != -100)
+        horizon_mask = targets.get("horizon_mask")
+        if horizon_mask is not None:
+            valid &= horizon_mask.bool()
+        if ((yield_labels == 1) & valid).any():
+            return 2
+
+    turn_labels = targets.get("turn_taking")
+    if turn_labels is not None:
+        if turn_labels.ndim == mask.ndim + 1:
+            valid = mask.unsqueeze(-1) & (turn_labels != -100)
+            horizon_mask = targets.get("horizon_mask")
+            if horizon_mask is not None:
+                valid &= horizon_mask.bool()
+        else:
+            valid = mask & (turn_labels != -100)
+        if ((turn_labels != 0) & valid).any():
+            return 1
+    return 0
 
 
 def _sequence_count(shard: Mapping[str, Any]) -> int:

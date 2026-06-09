@@ -6,9 +6,12 @@ import torch
 
 from facepred.data import TurnLabelConfig, derive_utterance_labels
 from facepred.engine.precompute import GateThresholds, PrecomputeEngine
-from scripts.calibrate_yield import threshold_for_minimum_precision
+from scripts.calibrate_yield import (
+    select_threshold_for_minimum_precision,
+    threshold_for_minimum_precision,
+)
 from scripts.prepare_meld_cache import corrected_transition_event, project_dialogue_to_steps
-from scripts.train_world_model import binary_probability_metrics
+from scripts.train_world_model import binary_probability_metrics, compute_yield_pos_weight
 
 
 def test_projected_events_are_sparse_and_countdown_decreases() -> None:
@@ -57,6 +60,39 @@ def test_yield_metrics_and_precision_threshold() -> None:
     assert threshold == pytest.approx(0.8)
     assert metrics["precision"] == 1.0
     assert metrics["average_precision"] > metrics["prevalence"]
+
+
+def test_infeasible_precision_policy_abstains() -> None:
+    policy = select_threshold_for_minimum_precision(
+        torch.tensor([0.9, 0.8, 0.7, 0.6]),
+        torch.tensor([0, 1, 0, 1]),
+        0.9,
+        minimum_commits=2,
+    )
+
+    assert policy["status"] == "infeasible_abstain"
+    assert policy["policy_satisfied"] is False
+    assert policy["threshold"] > 1.0
+    assert policy["commits"] == 0
+
+
+def test_mild_yield_weighting_modes() -> None:
+    loader = [
+        {
+            "targets": {
+                "yield": torch.tensor([[[1, 1], [0, 0], [0, 0], [0, 0]]]),
+            }
+        }
+    ]
+
+    torch.testing.assert_close(
+        compute_yield_pos_weight(loader, "sqrt_balanced"),
+        torch.tensor([3.0**0.5, 3.0**0.5]),
+    )
+    torch.testing.assert_close(
+        compute_yield_pos_weight(loader, "capped_balanced", cap=2.0),
+        torch.tensor([2.0, 2.0]),
+    )
 
 
 def test_gate_uses_calibrated_commit_and_planning_horizons() -> None:
