@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 from facepred.data import make_cached_dataloader
 from facepred.engine.trainer import load_project_config
 from facepred.models import FacePredLoss, FacePredWorldModel
+from facepred.utils import load_trusted_torch_artifact
 from scripts.train_world_model import MetricAccumulator, WorldMetricAccumulator, move_training_batch
 
 
@@ -38,7 +39,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     device = resolve_device(args.device)
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    checkpoint = load_trusted_torch_artifact(args.checkpoint, map_location=device)
     config = checkpoint.get("config") or load_project_config(args.config)
 
     model = FacePredWorldModel.from_config(config["model"]).to(device)

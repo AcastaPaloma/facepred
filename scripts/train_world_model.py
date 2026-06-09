@@ -23,7 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 from facepred.data import CacheManifest, make_cached_dataloader
 from facepred.engine.trainer import load_project_config
 from facepred.models import FacePredLoss, FacePredWorldModel
-from facepred.utils import seed_everything
+from facepred.utils import load_trusted_torch_artifact, seed_everything
 
 
 def parse_args() -> argparse.Namespace:
@@ -168,7 +168,7 @@ def main() -> int:
     bad_epochs = 0
     resume_path = resolve_resume_path(args.resume, checkpoint_dir)
     if resume_path is not None:
-        checkpoint = torch.load(resume_path, map_location=device)
+        checkpoint = load_trusted_torch_artifact(resume_path, map_location=device)
         validate_resume_checkpoint(
             checkpoint,
             config_fingerprint=config_fingerprint,

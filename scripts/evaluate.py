@@ -7,8 +7,6 @@ import json
 import sys
 from pathlib import Path
 
-import torch
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -20,6 +18,7 @@ from facepred.engine.trainer import (
     load_project_config,
     make_synthetic_batches,
 )
+from facepred.utils import load_trusted_torch_artifact
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,7 +47,7 @@ def main() -> int:
 
     model = TinyFacePredModel.from_settings(settings)
     if args.checkpoint:
-        checkpoint = torch.load(args.checkpoint, map_location=args.device)
+        checkpoint = load_trusted_torch_artifact(args.checkpoint, map_location=args.device)
         model.load_state_dict(checkpoint["model_state_dict"])
 
     batches = make_synthetic_batches(args.batches, settings, seed=args.seed, device=args.device)
@@ -60,4 +59,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

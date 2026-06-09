@@ -19,6 +19,8 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from facepred.utils import load_trusted_torch_artifact
+
 CACHE_VERSION = 1
 
 
@@ -100,7 +102,7 @@ class CachedSequenceDataset(Dataset):
                 self._index.extend((shard_idx, item_idx) for item_idx in range(count))
         else:
             for shard_idx, path in enumerate(self.shard_paths):
-                header = torch.load(path, map_location=map_location)
+                header = load_trusted_torch_artifact(path, map_location=map_location)
                 count = _sequence_count(header)
                 self._index.extend((shard_idx, item_idx) for item_idx in range(count))
 
@@ -131,7 +133,7 @@ class CachedSequenceDataset(Dataset):
 
 def load_cache_shard(path: str | Path, map_location: str | torch.device = "cpu") -> dict[str, Any]:
     """Load a cache shard and validate the expected top-level keys."""
-    shard = torch.load(Path(path), map_location=map_location)
+    shard = load_trusted_torch_artifact(Path(path), map_location=map_location)
     required = {"features", "targets", "mask"}
     missing = sorted(required - set(shard))
     if missing:

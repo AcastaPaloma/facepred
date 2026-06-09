@@ -33,6 +33,7 @@ from facepred.data import (
     write_cache_manifest,
 )
 from facepred.engine.trainer import load_project_config
+from facepred.utils import load_trusted_torch_artifact
 from scripts.prepare_meld_cache import (
     build_step_targets,
     label_config_from_project,
@@ -112,7 +113,7 @@ def main() -> int:
         for dialogue_index, (dialogue_id, dialogue) in enumerate(grouped, start=1):
             progress_path = progress_dir / f"{safe_id(dialogue_id)}.pt"
             if progress_path.exists():
-                payload = torch.load(progress_path, map_location="cpu")
+                payload = load_trusted_torch_artifact(progress_path, map_location="cpu")
             else:
                 payload = process_dialogue(
                     dialogue=dialogue,
@@ -149,7 +150,9 @@ def main() -> int:
 
         sequences: list[Mapping[str, Any]] = []
         for progress_path in sorted(progress_dir.glob("*.pt")):
-            sequences.extend(torch.load(progress_path, map_location="cpu")["sequences"])
+            sequences.extend(
+                load_trusted_torch_artifact(progress_path, map_location="cpu")["sequences"]
+            )
         split_shards[split] = write_split_shards(
             output_dir=output_dir,
             split=split,

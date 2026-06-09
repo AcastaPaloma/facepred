@@ -25,6 +25,7 @@ from facepred.utils.seeding import (
     seed_worker,
 )
 from facepred.utils.timing import Timer, format_seconds, time_block
+from facepred.utils.torch_io import load_trusted_torch_artifact
 
 __all__ = [
     "CalibrationBin",
@@ -42,6 +43,7 @@ __all__ = [
     "format_seconds",
     "get_logger",
     "log_once",
+    "load_trusted_torch_artifact",
     "make_torch_generator",
     "normalize_probabilities",
     "one_hot",

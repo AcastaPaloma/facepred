@@ -5,6 +5,7 @@ import logging
 import random
 
 import numpy as np
+import torch
 
 from facepred.utils import (
     Timer,
@@ -13,6 +14,7 @@ from facepred.utils import (
     confidence_margin,
     expected_calibration_error,
     format_seconds,
+    load_trusted_torch_artifact,
     log_once,
     predictive_entropy,
     seed_everything,
@@ -93,3 +95,15 @@ def test_softmax_accepts_logits() -> None:
 
     np.testing.assert_allclose(probs.sum(axis=-1), [1.0])
     assert probs.argmax(axis=-1).item() == 2
+
+
+def test_load_trusted_torch_artifact_restores_structured_training_state(tmp_path) -> None:
+    artifact_path = tmp_path / "checkpoint.pt"
+    rng_state = np.random.RandomState(42).get_state()
+    torch.save({"model_state_dict": {"weight": torch.ones(2)}, "numpy_rng": rng_state}, artifact_path)
+
+    artifact = load_trusted_torch_artifact(artifact_path, map_location="cpu")
+
+    assert artifact["numpy_rng"][0] == "MT19937"
+    np.testing.assert_array_equal(artifact["numpy_rng"][1], rng_state[1])
+    torch.testing.assert_close(artifact["model_state_dict"]["weight"], torch.ones(2))
