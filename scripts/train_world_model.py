@@ -880,9 +880,14 @@ def restore_rng_state(state: Mapping[str, Any] | None) -> None:
         return
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch"])
+    torch.set_rng_state(cpu_byte_rng_state(state["torch"]))
     if torch.cuda.is_available() and "cuda" in state:
-        torch.cuda.set_rng_state_all(state["cuda"])
+        torch.cuda.set_rng_state_all([cpu_byte_rng_state(value) for value in state["cuda"]])
+
+
+def cpu_byte_rng_state(state: torch.Tensor) -> torch.Tensor:
+    """Normalize a serialized RNG state after checkpoint device remapping."""
+    return state.detach().to(device="cpu", dtype=torch.uint8)
 
 
 def prune_step_checkpoints(checkpoint_dir: Path, keep: int) -> None:

@@ -4,7 +4,12 @@ import json
 
 import torch
 
-from scripts.train_world_model import compute_class_weights, make_scheduler
+from scripts.train_world_model import (
+    capture_rng_state,
+    compute_class_weights,
+    make_scheduler,
+    restore_rng_state,
+)
 from scripts.tune_and_train_colab import read_score
 
 
@@ -43,6 +48,16 @@ def test_long_schedule_does_not_reach_min_lr_at_stage1_end() -> None:
         scheduler.step()
 
     assert optimizer.param_groups[0]["lr"] > 9.0e-5
+
+
+def test_restore_rng_state_normalizes_remapped_torch_state() -> None:
+    state = capture_rng_state()
+    state["torch"] = state["torch"].to(dtype=torch.int16)
+
+    restore_rng_state(state)
+
+    assert torch.get_rng_state().dtype == torch.uint8
+    assert torch.get_rng_state().device.type == "cpu"
 
 
 def test_tuning_score_marks_majority_baseline_as_collapsed(tmp_path) -> None:
