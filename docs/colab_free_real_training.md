@@ -144,6 +144,19 @@ python scripts/prepare_meld_audio_cache.py \
 If Colab disconnects, rerun the staging command and the same cache command.
 Completed dialogue files under `.progress/` are reused.
 
+Validate the persistent Drive cache before switching runtimes or copying it:
+
+```bash
+python scripts/validate_campaign_v5_cache.py \
+  --cache-dir /content/drive/MyDrive/facepred/cache/meld_audio_yield_v3
+```
+
+Do not use `--allow-config-mismatch` to reuse v2 progress. If a directory named
+`meld_audio_yield_v3` contains a v2 manifest or extraction config, rename that
+directory and rebuild v3 from an empty destination. A valid interrupted v3
+build has a matching `extraction_config.json` and may be resumed with the same
+cache command.
+
 ## 4. Switch To GPU And Copy Cache Locally
 
 Change the Colab runtime to GPU. Then rerun mount, clone/install, and:
@@ -152,6 +165,7 @@ Change the Colab runtime to GPU. Then rerun mount, clone/install, and:
 rm -rf /content/facepred_cache
 mkdir -p /content/facepred_cache
 rsync -a --exclude '.progress/' /content/drive/MyDrive/facepred/cache/meld_audio_yield_v3/ /content/facepred_cache/
+python scripts/validate_campaign_v5_cache.py --cache-dir /content/facepred_cache
 python scripts/inspect_training_cache.py --cache-dir /content/facepred_cache --split train
 python scripts/inspect_training_cache.py --cache-dir /content/facepred_cache --split dev
 ```
