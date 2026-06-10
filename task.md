@@ -68,3 +68,14 @@
 - [x] Explicit calibration infeasibility and conservative abstention
 - [x] Calibrated selected-run evaluation with commit-count diagnostics
 - [x] Campaign-v4 literature review, architecture amendment, and Colab runbook
+
+## Phase 10: Causal Context And Commit-Safety Campaign
+- [x] Rich causal pitch, voicing, log-energy, and slope features
+- [x] Schema-v3 competing-risk event-time target
+- [x] Causal local-TCN plus long-context GRU encoder
+- [x] Learned commit-safety verifier with legacy yield fallback
+- [x] Verifier-aware calibration, evaluation, and runtime gating
+- [x] Reusable two-speaker VAP state target contract
+- [x] Controlled campaign-v5 runner, documentation, and Colab notebook
+- [ ] Acquire licensed Switchboard data and train the first true VAP baseline
+- [ ] Expand to Switchboard + Fisher, then run audiovisual CANDOR ablations

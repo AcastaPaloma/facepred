@@ -127,3 +127,54 @@ def test_legacy_model_config_omits_yield_head() -> None:
 
     assert "yield_logits" not in outputs
     assert "yield_probs" not in outputs
+
+
+def test_multirate_hazard_and_commit_safety_heads_are_causal_and_shaped() -> None:
+    config = tiny_model_config()
+    config["temporal"] = {
+        "type": "multi_rate_causal",
+        "hidden_dim": 16,
+        "dilations": [1, 2],
+        "kernel_size": 3,
+        "dropout": 0.0,
+    }
+    config["event_hazard_bins_ms"] = [200, 500, 1000, 2000]
+    config["heads"]["event_hazard"] = {"enabled": True}
+    config["heads"]["commit_safety"] = {"enabled": True}
+    config["rssm"]["use_stochastic"] = False
+    model = FacePredWorldModel.from_config(config).eval()
+    features = model.synthetic_features(batch_size=1, steps=8)
+    changed = {name: value.clone() for name, value in features.items()}
+    for value in changed.values():
+        value[:, 5:] = torch.randn_like(value[:, 5:]) * 10.0
+
+    first = model(features)
+    second = model(changed)
+
+    assert first["event_hazard_logits"].shape == (1, 8, 13)
+    assert first["commit_safety_logits"].shape == (1, 8, 2)
+    torch.testing.assert_close(first["temporal"][:, :5], second["temporal"][:, :5])
+    torch.testing.assert_close(
+        first["commit_safety_probs"][:, :5],
+        second["commit_safety_probs"][:, :5],
+    )
+
+
+def test_event_hazard_and_commit_safety_losses_use_available_targets() -> None:
+    config = tiny_model_config()
+    config["event_hazard_bins_ms"] = [200, 500]
+    config["heads"]["event_hazard"] = {"enabled": True}
+    config["heads"]["commit_safety"] = {"enabled": True}
+    model = FacePredWorldModel.from_config(config)
+    outputs = model(model.synthetic_features(batch_size=1, steps=4))
+    targets = {
+        "yield": torch.randint(0, 2, (1, 4, 2)),
+        "horizon_mask": torch.ones(1, 4, 2, dtype=torch.bool),
+        "event_hazard": torch.randint(0, 7, (1, 4)),
+    }
+
+    loss = FacePredLoss(weights={"commit_safety": 1.0, "event_hazard": 1.0})(outputs, targets)
+
+    assert torch.isfinite(loss.total)
+    assert "commit_safety" in loss.components
+    assert "event_hazard" in loss.components

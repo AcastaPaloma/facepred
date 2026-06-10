@@ -102,7 +102,8 @@ def evaluate(
     model.eval()
     accumulator = MetricAccumulator()
     world_accumulator = WorldMetricAccumulator(
-        calibration.get("thresholds", ()) if calibration else ()
+        calibration.get("thresholds", ()) if calibration else (),
+        operating_score_source=str(calibration.get("score_source", "yield")) if calibration else "yield",
     )
     for batch_idx, batch in enumerate(loader):
         if max_batches is not None and batch_idx >= max_batches:
@@ -127,7 +128,11 @@ def apply_yield_calibration(
     """Apply dev-fitted per-horizon temperatures before operating-point metrics."""
 
     result = dict(outputs)
-    logits = result.get("yield_logits")
+    score_source = str(calibration.get("score_source", "yield"))
+    logits_key = f"{score_source}_logits"
+    probs_key = f"{score_source}_probs"
+    entropy_key = f"{score_source}_entropy"
+    logits = result.get(logits_key)
     if logits is None:
         return result
     temperatures = tuple(float(value) for value in calibration.get("temperatures", ()))
@@ -140,11 +145,11 @@ def apply_yield_calibration(
         dtype=logits.dtype,
         device=logits.device,
     ).clamp_min(1.0e-6)
-    result["yield_probs"] = torch.sigmoid(logits / temperature_tensor)
-    result["yield_entropy"] = -(
-        result["yield_probs"] * result["yield_probs"].clamp_min(1.0e-8).log()
-        + (1.0 - result["yield_probs"])
-        * (1.0 - result["yield_probs"]).clamp_min(1.0e-8).log()
+    result[probs_key] = torch.sigmoid(logits / temperature_tensor)
+    result[entropy_key] = -(
+        result[probs_key] * result[probs_key].clamp_min(1.0e-8).log()
+        + (1.0 - result[probs_key])
+        * (1.0 - result[probs_key]).clamp_min(1.0e-8).log()
     )
     return result
 

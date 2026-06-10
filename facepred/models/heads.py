@@ -17,6 +17,9 @@ class HeadConfig:
     emotion_classes: int = 7
     hidden_dim: int = 128
     yield_enabled: bool = False
+    event_hazard_enabled: bool = False
+    event_hazard_bins: int = 4
+    commit_safety_enabled: bool = False
 
 
 class MLPHead(nn.Module):
@@ -58,6 +61,22 @@ class PredictionHeads(nn.Module):
         self.yield_prediction = (
             MLPHead(state_dim, hidden, self.num_horizons, dropout)
             if self.config.yield_enabled
+            else None
+        )
+        self.event_hazard = (
+            MLPHead(
+                state_dim,
+                hidden,
+                1 + 3 * self.config.event_hazard_bins,
+                dropout,
+            )
+            if self.config.event_hazard_enabled
+            else None
+        )
+        safety_input_dim = state_dim + 4 * self.num_horizons
+        self.commit_safety = (
+            MLPHead(safety_input_dim, hidden, self.num_horizons, dropout)
+            if self.config.commit_safety_enabled and self.config.yield_enabled
             else None
         )
         self.end_of_turn = MLPHead(
@@ -106,6 +125,43 @@ class PredictionHeads(nn.Module):
                     "yield_logits": yield_logits,
                     "yield_probs": yield_probs,
                     "yield_entropy": binary_entropy(yield_probs),
+                }
+            )
+            if self.commit_safety is not None:
+                proposal_probs = yield_probs.detach()
+                proposal_entropy = binary_entropy(proposal_probs)
+                previous = torch.cat(
+                    [proposal_probs[:, :1], proposal_probs[:, :-1]],
+                    dim=1,
+                )
+                proposal_delta = proposal_probs - previous
+                proposal_stability = 1.0 - proposal_delta.abs()
+                verifier_input = torch.cat(
+                    [
+                        state,
+                        proposal_probs,
+                        proposal_entropy,
+                        proposal_delta,
+                        proposal_stability,
+                    ],
+                    dim=-1,
+                )
+                safety_logits = self.commit_safety(verifier_input)
+                safety_probs = torch.sigmoid(safety_logits)
+                outputs.update(
+                    {
+                        "commit_safety_logits": safety_logits,
+                        "commit_safety_probs": safety_probs,
+                        "commit_safety_entropy": binary_entropy(safety_probs),
+                    }
+                )
+        if self.event_hazard is not None:
+            event_hazard_logits = self.event_hazard(state)
+            outputs.update(
+                {
+                    "event_hazard_logits": event_hazard_logits,
+                    "event_hazard_probs": F.softmax(event_hazard_logits, dim=-1),
+                    "event_hazard_entropy": categorical_entropy(event_hazard_logits),
                 }
             )
         return outputs

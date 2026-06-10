@@ -92,6 +92,10 @@ def main() -> int:
     label_config = label_config_from_project(data_cfg, model_cfg)
     horizons_ms = [int(value) for value in model_cfg.get("prediction_horizons_ms", [200, 1000])]
     horizon_steps = [max(1, int(round(value / step_ms))) for value in horizons_ms]
+    event_hazard_bins_ms = [int(value) for value in model_cfg.get("event_hazard_bins_ms", [])]
+    event_hazard_steps = [
+        max(1, int(round(value / step_ms))) for value in event_hazard_bins_ms
+    ]
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -114,6 +118,7 @@ def main() -> int:
             sequence_length=sequence_length,
             stride_steps=stride_steps,
             horizon_steps=horizon_steps,
+            event_hazard_steps=event_hazard_steps,
             seed=args.seed,
         )
         split_shards[canonical_split] = write_split_shards(
@@ -136,7 +141,12 @@ def main() -> int:
             "stride_s": stride_s,
             "config": str(Path(args.config)),
             "horizons_ms": horizons_ms,
-            "target_schema": "earliest_event_safe_yield_v2",
+            "target_schema": (
+                "earliest_event_safe_yield_v3"
+                if event_hazard_steps
+                else "earliest_event_safe_yield_v2"
+            ),
+            "event_hazard_bins_ms": event_hazard_bins_ms,
             "event_gap_buckets": EVENT_GAP_BUCKETS,
             "causal_features": False,
             "oracle_text": "text" in modalities,
@@ -239,6 +249,7 @@ def build_split_sequences(
     sequence_length: int,
     stride_steps: int,
     horizon_steps: Sequence[int],
+    event_hazard_steps: Sequence[int],
     seed: int,
 ) -> list[dict[str, Any]]:
     normalized = normalize_meld_dataframe(frame, split=split)
@@ -254,7 +265,11 @@ def build_split_sequences(
             input_dims=input_dims,
             seed=seed + stable_int(str(dialogue_id), modulo=100_000),
         )
-        targets = build_step_targets(projected, horizon_steps=horizon_steps)
+        targets = build_step_targets(
+            projected,
+            horizon_steps=horizon_steps,
+            event_hazard_steps=event_hazard_steps,
+        )
         windows = window_dialogue(
             features=features,
             targets=targets,
@@ -510,6 +525,7 @@ def build_step_targets(
     projected: pd.DataFrame,
     *,
     horizon_steps: Sequence[int],
+    event_hazard_steps: Sequence[int] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Build earliest-event, safe-yield, and future countdown targets."""
 
@@ -543,6 +559,11 @@ def build_step_targets(
             (length, len(horizon_steps)), float(TURN_IGNORE_INDEX), dtype=torch.float32
         ),
     }
+    if event_hazard_steps:
+        targets["event_hazard"] = build_event_hazard_targets(
+            events,
+            bin_upper_steps=event_hazard_steps,
+        )
 
     for horizon_idx, offset in enumerate(horizon_steps):
         valid = max(0, length - int(offset))
@@ -567,6 +588,36 @@ def build_step_targets(
                 ]
 
     targets["horizon_mask"] = horizon_mask
+    return targets
+
+
+def build_event_hazard_targets(
+    events: torch.Tensor,
+    *,
+    bin_upper_steps: Sequence[int],
+) -> torch.Tensor:
+    """Return a discrete competing-risk target for the earliest future event.
+
+    Class zero means no event inside the maximum horizon. Remaining classes
+    encode ``time-bin x {shift, backchannel, overlap}``.
+    """
+
+    upper = [int(value) for value in bin_upper_steps]
+    if not upper or any(value <= 0 for value in upper) or upper != sorted(set(upper)):
+        raise ValueError("event hazard bin upper steps must be positive and strictly increasing")
+    length = int(events.numel())
+    maximum = upper[-1]
+    targets = torch.full((length,), TURN_IGNORE_INDEX, dtype=torch.long)
+    for step in range(max(0, length - maximum)):
+        future = events[step + 1 : step + maximum + 1]
+        non_hold = torch.nonzero(future != 0, as_tuple=False)
+        if not non_hold.numel():
+            targets[step] = 0
+            continue
+        relative_step = int(non_hold[0, 0]) + 1
+        event = int(future[relative_step - 1])
+        bin_idx = next(idx for idx, boundary in enumerate(upper) if relative_step <= boundary)
+        targets[step] = 1 + bin_idx * 3 + (event - 1)
     return targets
 
 
@@ -624,7 +675,7 @@ def pad_time(tensor: torch.Tensor, sequence_length: int, value: float = 0.0) -> 
 def pad_target(name: str, tensor: torch.Tensor, sequence_length: int) -> torch.Tensor:
     if name == "valence_arousal":
         return pad_time(tensor, sequence_length, value=0.0)
-    if name == "horizon_mask":
+    if name.endswith("_mask"):
         return pad_time(tensor, sequence_length, value=0.0)
     out = torch.full((sequence_length, *tensor.shape[1:]), TURN_IGNORE_INDEX, dtype=tensor.dtype)
     out[: tensor.shape[0]] = tensor

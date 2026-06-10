@@ -21,6 +21,7 @@ from facepred.data.cached import (
     load_cache_shard,
     make_cached_dataloader,
     save_cache_shard,
+    validate_event_hazard_cache,
     validate_safe_yield_cache,
     write_cache_manifest,
 )
@@ -65,6 +66,7 @@ from facepred.data.synchronizer import (
     make_synthetic_synchronized_batch,
     make_time_grid,
 )
+from facepred.data.vap import build_vap_state_targets
 
 __all__ = [
     "AdditiveGaussianNoise",
@@ -98,6 +100,7 @@ __all__ = [
     "add_gaussian_noise",
     "add_meld_media_paths",
     "bucket_time_to_yield",
+    "build_vap_state_targets",
     "canonical_meld_split",
     "collate_cached_sequences",
     "event_balanced_sample_weights",
@@ -120,6 +123,7 @@ __all__ = [
     "parse_time_seconds",
     "save_cache_shard",
     "validate_safe_yield_cache",
+    "validate_event_hazard_cache",
     "temporal_shift",
     "write_cache_manifest",
 ]

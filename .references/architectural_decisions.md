@@ -89,6 +89,28 @@ Longer context and richer causal prosody remain important, literature-supported
 ablations, but they are deferred because changing them in v4 would confound the
 imbalance/sampling comparison. See [`docs/campaign_v4.md`](../docs/campaign_v4.md).
 
+### Campaign 5 Amendment: Causal Context And Commit Verification
+
+Campaign v5 addresses v4's inadequate high-precision coverage by changing the
+evidence and decision architecture together, while retaining an honest
+MELD-proxy interpretation.
+
+| Decision | Campaign v5 choice |
+|---|---|
+| Cache | Schema v3 in `meld_audio_yield_v3` |
+| Audio features | Add causal F0, voicing confidence, log energy, and slopes |
+| Context | 20-second windows at 100 ms resolution |
+| Temporal encoder | Local causal dilated TCN plus full-context causal GRU |
+| Event timing | Competing-risk earliest event across 200/500/1000/2000 ms bins |
+| Commit score | Learned verifier over latent state and direct-yield proposal stability |
+| Selection | Verifier AP when present; direct-yield AP otherwise |
+| Gating | Prefer calibrated verifier score; retain legacy yield fallback |
+| Dataset next step | Switchboard, then Switchboard + Fisher; CANDOR before vision |
+
+The repository also defines the true two-speaker categorical VAP target
+contract. MELD cannot populate it honestly. See
+[`docs/campaign_v5.md`](../docs/campaign_v5.md).
+
 ---
 
 ## World Model Architecture

@@ -12,6 +12,7 @@ from facepred.models.encoders import ModalityEncoders, spec_from_config
 from facepred.models.fusion import ReliabilityGatedFusion
 from facepred.models.heads import HeadConfig, PredictionHeads
 from facepred.models.rssm import RSSM
+from facepred.models.temporal import MultiRateCausalEncoder
 
 
 def _get(mapping: Any, key: str, default: Any = None) -> Any:
@@ -27,12 +28,14 @@ class FacePredWorldModel(nn.Module):
         self,
         encoders: ModalityEncoders,
         fusion: ReliabilityGatedFusion,
+        temporal: nn.Module,
         rssm: RSSM,
         heads: PredictionHeads,
     ) -> None:
         super().__init__()
         self.encoders = encoders
         self.fusion = fusion
+        self.temporal = temporal
         self.rssm = rssm
         self.heads = heads
 
@@ -57,6 +60,20 @@ class FacePredWorldModel(nn.Module):
         )
 
         rssm_cfg = _get(config, "rssm", {})
+        temporal_cfg = _get(config, "temporal", {})
+        temporal_type = str(_get(temporal_cfg, "type", "none"))
+        if temporal_type == "none":
+            temporal: nn.Module = nn.Identity()
+        elif temporal_type == "multi_rate_causal":
+            temporal = MultiRateCausalEncoder(
+                fusion.embed_dim,
+                hidden_dim=int(_get(temporal_cfg, "hidden_dim", fusion.embed_dim)),
+                dilations=tuple(int(value) for value in _get(temporal_cfg, "dilations", [1, 2, 4, 8])),
+                kernel_size=int(_get(temporal_cfg, "kernel_size", 3)),
+                dropout=float(_get(temporal_cfg, "dropout", 0.1)),
+            )
+        else:
+            raise ValueError(f"Unsupported temporal encoder type: {temporal_type}")
         rssm = RSSM(
             input_dim=fusion.embed_dim,
             gru_hidden=int(_get(rssm_cfg, "gru_hidden", 128)),
@@ -87,6 +104,11 @@ class FacePredWorldModel(nn.Module):
             emotion_classes=int(_get(affect_cfg, "num_emotions", 7)),
             hidden_dim=hidden_dim,
             yield_enabled=bool(_get(yield_cfg, "enabled", False)),
+            event_hazard_enabled=bool(_get(_get(heads_cfg, "event_hazard", {}), "enabled", False)),
+            event_hazard_bins=len(_get(config, "event_hazard_bins_ms", [200, 500, 1000, 2000])),
+            commit_safety_enabled=bool(
+                _get(_get(heads_cfg, "commit_safety", {}), "enabled", False)
+            ),
         )
         heads = PredictionHeads(
             state_dim=rssm.state_dim,
@@ -94,7 +116,7 @@ class FacePredWorldModel(nn.Module):
             config=head_config,
             dropout=float(_get(fusion_cfg, "dropout", 0.1)),
         )
-        return cls(encoders=encoders, fusion=fusion, rssm=rssm, heads=heads)
+        return cls(encoders=encoders, fusion=fusion, temporal=temporal, rssm=rssm, heads=heads)
 
     def forward(
         self,
@@ -107,11 +129,13 @@ class FacePredWorldModel(nn.Module):
         raw_quality = quality if quality is not None else features.get("quality")
         encoded = self.encoders(features)
         fused, reliability = self.fusion(encoded, quality=raw_quality, modality_mask=modality_mask)
-        rssm_output = self.rssm(fused)
+        temporal = self.temporal(fused)
+        rssm_output = self.rssm(temporal)
         predictions = self.heads(rssm_output.state)
         predictions.update(
             {
                 "fused": fused,
+                "temporal": temporal,
                 "reliability": reliability,
                 "rssm_state": rssm_output.state,
                 "rssm": rssm_output,

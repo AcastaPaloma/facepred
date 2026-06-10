@@ -1,0 +1,63 @@
+# Campaign-v5 encoder-only ablation: multi-rate causal context with direct yield.
+rssm:
+  gru_hidden: 256
+  latent_type: categorical
+  categorical_classes: 32
+  categorical_dims: 16
+  gaussian_dim: 64
+  use_stochastic: false
+
+step_duration_ms: 100
+prediction_horizons_ms: [200, 1000]
+event_hazard_bins_ms: [200, 500, 1000, 2000]
+
+encoders:
+  audio_prosody:
+    input_dim: 32
+    hidden_dim: 128
+    output_dim: 128
+    num_layers: 2
+    dropout: 0.1
+  vad:
+    input_dim: 3
+    output_dim: 32
+  quality:
+    input_dim: 4
+    output_dim: 32
+
+fusion:
+  type: concat
+  embed_dim: 256
+  num_heads: 4
+  dropout: 0.1
+  reliability: none
+
+temporal:
+  type: multi_rate_causal
+  hidden_dim: 256
+  dilations: [1, 2, 4, 8]
+  kernel_size: 3
+  dropout: 0.1
+
+heads:
+  yield:
+    enabled: true
+  event_hazard:
+    enabled: false
+  commit_safety:
+    enabled: false
+  turn_taking:
+    num_classes: 4
+    hidden_dim: 256
+  end_of_turn:
+    num_buckets: 10
+    hidden_dim: 256
+  dialog_act:
+    num_classes: 13
+    hidden_dim: 256
+  affect:
+    type: both
+    num_emotions: 7
+    hidden_dim: 128
+  uncertainty:
+    method: entropy

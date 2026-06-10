@@ -116,8 +116,10 @@ def extract_yield_probs(
 ) -> torch.Tensor | None:
     """Extract latest per-horizon safe-yield probabilities when available."""
 
-    if "yield_logits" in predictions:
-        logits = _latest_vector(predictions["yield_logits"])
+    logits_key = "commit_safety_logits" if "commit_safety_logits" in predictions else "yield_logits"
+    probs_key = "commit_safety_probs" if "commit_safety_probs" in predictions else "yield_probs"
+    if logits_key in predictions:
+        logits = _latest_vector(predictions[logits_key])
         if temperatures:
             values = torch.as_tensor(temperatures, dtype=logits.dtype)
             if values.numel() < logits.numel():
@@ -128,8 +130,8 @@ def extract_yield_probs(
                 )
             logits = logits / values[: logits.numel()].clamp_min(1.0e-6)
         return torch.sigmoid(logits)
-    if "yield_probs" in predictions:
-        return _latest_vector(predictions["yield_probs"])
+    if probs_key in predictions:
+        return _latest_vector(predictions[probs_key])
     return None
 
 

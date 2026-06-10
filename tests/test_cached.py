@@ -5,17 +5,18 @@ import pytest
 import torch
 
 from facepred.data import (
-    CacheManifest,
     CachedSequenceDataset,
+    CacheManifest,
     CacheShard,
     collate_cached_sequences,
     event_balanced_sample_weights,
     save_cache_shard,
+    validate_event_hazard_cache,
     validate_safe_yield_cache,
     write_cache_manifest,
 )
 from scripts.prepare_meld_audio_cache import extract_causal_audio_features
-from scripts.prepare_meld_cache import build_step_targets
+from scripts.prepare_meld_cache import build_event_hazard_targets, build_step_targets
 from scripts.train_world_model import WorldMetricAccumulator
 
 
@@ -84,19 +85,19 @@ def test_future_targets_are_shifted_and_masked() -> None:
 
 
 def test_causal_audio_features_have_model_contract() -> None:
-    waveform = torch.sin(torch.linspace(0.0, 100.0, 1600))
+    waveform = torch.sin(torch.linspace(0.0, 100.0, 6400))
     audio, vad, quality = extract_causal_audio_features(waveform, num_frames=4)
 
-    assert audio.shape == (4, 25)
+    assert audio.shape == (4, 32)
     assert vad.shape == (4, 3)
     assert quality.shape == (4, 4)
     assert torch.isfinite(audio).all()
 
 
 def test_causal_audio_features_are_prefix_invariant() -> None:
-    waveform = torch.sin(torch.linspace(0.0, 100.0, 1600))
+    waveform = torch.sin(torch.linspace(0.0, 100.0, 6400))
     changed_future = waveform.clone()
-    changed_future[800:] = torch.randn_like(changed_future[800:]) * 10.0
+    changed_future[3200:] = torch.randn_like(changed_future[3200:]) * 10.0
 
     first = extract_causal_audio_features(waveform, num_frames=4)
     second = extract_causal_audio_features(changed_future, num_frames=4)
@@ -133,6 +134,38 @@ def test_safe_yield_cache_validation_explains_missing_target(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="missing targets.*yield"):
         validate_safe_yield_cache(tmp_path, splits=("dev",))
+
+
+def test_campaign_v5_cache_validation_accepts_rich_event_hazard_cache(tmp_path) -> None:
+    targets = {
+        "turn_taking": torch.zeros(1, 4, 2, dtype=torch.long),
+        "yield": torch.zeros(1, 4, 2, dtype=torch.long),
+        "end_of_turn": torch.zeros(1, 4, 2, dtype=torch.long),
+        "horizon_mask": torch.ones(1, 4, 2, dtype=torch.bool),
+        "event_hazard": torch.zeros(1, 4, dtype=torch.long),
+    }
+    save_cache_shard(
+        tmp_path / "train" / "train_0000.pt",
+        features={"audio_prosody": torch.ones(1, 4, 32)},
+        targets=targets,
+        mask=torch.ones(1, 4, dtype=torch.bool),
+    )
+    write_cache_manifest(
+        tmp_path,
+        modalities=["audio_prosody"],
+        sequence_length=4,
+        step_duration_ms=100,
+        splits={"train": [CacheShard(path="train/train_0000.pt", num_sequences=1)]},
+        metadata={
+            "target_schema": "earliest_event_safe_yield_v3",
+            "feature_mode": "causal_audio_stats_v3_pitch_voicing",
+            "event_hazard_bins_ms": [200, 500, 1000, 2000],
+        },
+    )
+
+    contract = validate_event_hazard_cache(tmp_path, splits=("train",))
+
+    assert contract["event_hazard_bins_ms"] == [200, 500, 1000, 2000]
 
 
 def test_event_balanced_weights_allocate_mass_by_window_group() -> None:
@@ -180,3 +213,37 @@ def test_world_metrics_expose_majority_collapse() -> None:
     assert metrics["turn_active_classes_mean"] == 1.0
     assert metrics["turn_macro_f1_mean"] == metrics["turn_majority_macro_f1_mean"]
     assert metrics["turn_pred_support/h0/class1"] == 4.0
+
+
+def test_event_hazard_target_encodes_earliest_marked_event_bin() -> None:
+    events = torch.tensor([0, 0, 1, 0, 0, 2, 3, 0])
+
+    targets = build_event_hazard_targets(events, bin_upper_steps=[2, 4])
+
+    assert targets[0] == 1
+    assert targets[1] == 1
+    assert targets[2] == 5
+    assert targets[-4:].eq(-100).all()
+
+
+def test_calibrated_threshold_applies_only_to_selected_commit_score() -> None:
+    accumulator = WorldMetricAccumulator(
+        yield_thresholds=(0.9,),
+        operating_score_source="commit_safety",
+    )
+    accumulator.update(
+        {
+            "yield_probs": torch.tensor([[[0.6]]]),
+            "commit_safety_probs": torch.tensor([[[0.8]]]),
+        },
+        {
+            "yield": torch.tensor([[[1]]]),
+            "mask": torch.ones(1, 1, dtype=torch.bool),
+            "horizon_mask": torch.ones(1, 1, 1, dtype=torch.bool),
+        },
+    )
+
+    metrics = accumulator.metrics()
+
+    assert metrics["yield_commits/h0"] == 1
+    assert metrics["commit_safety_commits/h0"] == 0

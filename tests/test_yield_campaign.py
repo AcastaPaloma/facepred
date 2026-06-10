@@ -117,3 +117,24 @@ def test_gate_uses_calibrated_commit_and_planning_horizons() -> None:
     assert decision.should_commit is True
     assert decision.yield_probability == torch.sigmoid(torch.tensor(1.0)).item()
     assert decision.candidates[0].name == "answer"
+
+
+def test_gate_prefers_commit_safety_verifier_over_direct_yield() -> None:
+    engine = PrecomputeEngine(
+        GateThresholds(
+            yield_threshold=0.8,
+            entropy_max=1.0,
+            margin_min=0.0,
+            commit_horizon_index=0,
+        )
+    )
+    predictions = {
+        "yield_logits": torch.tensor([[[10.0, 10.0]]]),
+        "commit_safety_logits": torch.tensor([[[-10.0, -10.0]]]),
+        "turn_probs": torch.tensor([[[0.1, 0.8, 0.1, 0.0]]]),
+    }
+
+    decision = engine.decide(predictions)
+
+    assert decision.should_commit is False
+    assert decision.reason == "blocked_by_yield_probability"

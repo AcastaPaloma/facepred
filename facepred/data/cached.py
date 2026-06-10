@@ -21,11 +21,12 @@ from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from facepred.utils import load_trusted_torch_artifact
 
-CACHE_VERSION = 2
-SUPPORTED_CACHE_VERSIONS = (1, 2)
+CACHE_VERSION = 3
+SUPPORTED_CACHE_VERSIONS = (1, 2, 3)
 SAFE_YIELD_TARGETS = frozenset(
     {"turn_taking", "yield", "end_of_turn", "horizon_mask"}
 )
+EVENT_HAZARD_TARGETS = SAFE_YIELD_TARGETS | {"event_hazard"}
 
 
 @dataclass(frozen=True)
@@ -163,9 +164,9 @@ def validate_safe_yield_cache(
     if manifest.version < 2:
         errors.append(f"manifest version is {manifest.version}, expected at least 2")
     target_schema = manifest.metadata.get("target_schema")
-    if target_schema != "earliest_event_safe_yield_v2":
+    if target_schema not in {"earliest_event_safe_yield_v2", "earliest_event_safe_yield_v3"}:
         errors.append(
-            f"target schema is {target_schema!r}, expected 'earliest_event_safe_yield_v2'"
+            f"target schema is {target_schema!r}, expected a corrected safe-yield schema"
         )
 
     targets_by_split: dict[str, list[str]] = {}
@@ -188,7 +189,7 @@ def validate_safe_yield_cache(
         details = "; ".join(errors)
         raise ValueError(
             f"{cache_dir} is not a corrected safe-yield cache: {details}. "
-            "Copy Drive cache/meld_audio_yield_v2 into the local cache directory, "
+            "Copy the intended meld_audio_yield_v2 or meld_audio_yield_v3 Drive cache locally, "
             "or rebuild it with scripts/prepare_meld_audio_cache.py."
         )
     return {
@@ -197,6 +198,44 @@ def validate_safe_yield_cache(
         "target_schema": target_schema,
         "modalities": list(manifest.modalities),
         "targets_by_split": targets_by_split,
+    }
+
+
+def validate_event_hazard_cache(
+    cache_dir: str | Path,
+    *,
+    splits: Sequence[str] = ("train", "dev"),
+) -> dict[str, Any]:
+    """Validate the campaign-v5 rich-feature and event-hazard cache."""
+
+    contract = validate_safe_yield_cache(cache_dir, splits=splits)
+    manifest = CacheManifest.load(cache_dir)
+    errors: list[str] = []
+    if manifest.version < 3:
+        errors.append(f"manifest version is {manifest.version}, expected at least 3")
+    if manifest.metadata.get("target_schema") != "earliest_event_safe_yield_v3":
+        errors.append("target schema is not 'earliest_event_safe_yield_v3'")
+    if manifest.metadata.get("feature_mode") != "causal_audio_stats_v3_pitch_voicing":
+        errors.append("feature mode is not 'causal_audio_stats_v3_pitch_voicing'")
+    for split in splits:
+        if split not in manifest.splits or not manifest.splits[split]:
+            continue
+        shard = load_cache_shard(manifest.shard_paths(split)[0], map_location="cpu")
+        missing = sorted(EVENT_HAZARD_TARGETS - set(shard["targets"]))
+        if missing:
+            errors.append(f"split {split!r} is missing targets {missing}")
+        audio = shard["features"].get("audio_prosody")
+        if audio is None or audio.shape[-1] != 32:
+            errors.append(f"split {split!r} does not contain 32-dimensional rich audio features")
+    if errors:
+        raise ValueError(
+            f"{cache_dir} is not a campaign-v5 event-hazard cache: {'; '.join(errors)}. "
+            "Rebuild it with scripts/prepare_meld_audio_cache.py into meld_audio_yield_v3."
+        )
+    return {
+        **contract,
+        "feature_mode": manifest.metadata.get("feature_mode"),
+        "event_hazard_bins_ms": manifest.metadata.get("event_hazard_bins_ms", []),
     }
 
 

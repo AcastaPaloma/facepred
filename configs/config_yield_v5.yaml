@@ -1,0 +1,27 @@
+defaults:
+  - model: gru_s_audio_yield_multirate_safety
+  - data: meld
+  - feature: audio
+  - training: yield_v5
+  - _self_
+
+project:
+  name: facepred
+  seed: 42
+  device: auto
+  debug: false
+
+logging:
+  backend: none
+
+engine:
+  precompute_k: 3
+  gate_yield_threshold: 0.8
+  gate_entropy_max: 0.5
+  gate_margin_min: 0.3
+  commit_horizon_index: 0
+  planning_horizon_index: 1
+  yield_calibration_path: null
+
+evaluation:
+  primary_metric: commit_safety_average_precision_mean

@@ -43,20 +43,23 @@ from scripts.prepare_meld_cache import (
     write_split_shards,
 )
 
-AUDIO_FEATURE_DIM = 25
+AUDIO_FEATURE_DIM = 32
 SAMPLE_RATE = 16_000
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/config_yield.yaml")
-    parser.add_argument("--model-config", default="configs/model/gru_s_audio_yield.yaml")
+    parser.add_argument("--config", default="configs/config_yield_v5.yaml")
+    parser.add_argument(
+        "--model-config",
+        default="configs/model/gru_s_audio_yield_multirate_safety.yaml",
+    )
     parser.add_argument("--data-root", required=True, help="Extracted MELD.Raw root.")
     parser.add_argument("--output-dir", required=True, help="Persistent cache directory, normally Drive.")
     parser.add_argument("--splits", nargs="+", default=["train", "dev", "test"])
-    parser.add_argument("--sequence-length-s", type=float, default=5.0)
-    parser.add_argument("--train-stride-s", type=float, default=2.5)
-    parser.add_argument("--eval-stride-s", type=float, default=5.0)
+    parser.add_argument("--sequence-length-s", type=float, default=20.0)
+    parser.add_argument("--train-stride-s", type=float, default=5.0)
+    parser.add_argument("--eval-stride-s", type=float, default=20.0)
     parser.add_argument("--shard-size", type=int, default=512)
     parser.add_argument("--max-dialogues", type=int, default=None, help="Smoke-test limit per split.")
     parser.add_argument("--log-every", type=int, default=25)
@@ -73,6 +76,12 @@ def main() -> int:
     step_ms = int(model_config.get("step_duration_ms", 100))
     horizons_ms = [int(value) for value in model_config.get("prediction_horizons_ms", [200, 1000])]
     horizon_steps = [max(1, int(round(value / step_ms))) for value in horizons_ms]
+    event_hazard_bins_ms = [
+        int(value) for value in model_config.get("event_hazard_bins_ms", [200, 500, 1000, 2000])
+    ]
+    event_hazard_steps = [
+        max(1, int(round(value / step_ms))) for value in event_hazard_bins_ms
+    ]
     sequence_length = max(1, int(round(args.sequence_length_s * 1000 / step_ms)))
     train_stride_steps = max(1, int(round(args.train_stride_s * 1000 / step_ms)))
     eval_stride_steps = max(1, int(round(args.eval_stride_s * 1000 / step_ms)))
@@ -81,11 +90,13 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     extraction_config = {
-        "feature_mode": "causal_audio_stats_v2",
+        "feature_mode": "causal_audio_stats_v3_pitch_voicing",
         "feature_alignment": "previous_frame_right_edge",
+        "frame_window": "fixed_step_samples",
         "model_config": model_config,
         "step_ms": step_ms,
         "horizons_ms": horizons_ms,
+        "event_hazard_bins_ms": event_hazard_bins_ms,
         "sequence_length": sequence_length,
         "train_stride_steps": train_stride_steps,
         "eval_stride_steps": eval_stride_steps,
@@ -124,6 +135,7 @@ def main() -> int:
                     sequence_length=sequence_length,
                     stride_steps=stride_steps,
                     horizon_steps=horizon_steps,
+                    event_hazard_steps=event_hazard_steps,
                     label_config=label_config,
                 )
                 atomic_torch_save(payload, progress_path)
@@ -170,12 +182,14 @@ def main() -> int:
         splits=split_shards,
         metadata={
             "source": "meld_raw_media",
-            "feature_mode": "causal_audio_stats_v2",
+            "feature_mode": "causal_audio_stats_v3_pitch_voicing",
             "feature_alignment": "previous_frame_right_edge",
+            "frame_window": "fixed_step_samples",
             "causal_features": True,
             "oracle_text": False,
             "horizons_ms": horizons_ms,
-            "target_schema": "earliest_event_safe_yield_v2",
+            "target_schema": "earliest_event_safe_yield_v3",
+            "event_hazard_bins_ms": event_hazard_bins_ms,
             "event_gap_buckets": EVENT_GAP_BUCKETS,
             "targets": [
                 "turn_taking",
@@ -184,6 +198,7 @@ def main() -> int:
                 "horizon_mask",
                 "event_gap_bucket",
                 "time_to_yield_s",
+                "event_hazard",
             ],
             "model_config": str(args.model_config),
             "stats": split_stats,
@@ -216,6 +231,7 @@ def process_dialogue(
     sequence_length: int,
     stride_steps: int,
     horizon_steps: Sequence[int],
+    event_hazard_steps: Sequence[int],
     label_config: Any,
 ) -> dict[str, Any]:
     dialogue = dialogue.sort_values(["start_s", "end_s", "utterance_id"]).reset_index(drop=True)
@@ -242,6 +258,7 @@ def process_dialogue(
                 waveform,
                 num_frames=len(indices),
                 normalize_vad=False,
+                frame_samples=max(1, int(round(SAMPLE_RATE * step_ms / 1000))),
             )
         except Exception:
             stats["decode_errors"] += 1
@@ -264,7 +281,11 @@ def process_dialogue(
     quality[:, 0] = speech
     quality[:, 3] = present.float()
     features = {"audio_prosody": audio, "vad": vad, "quality": quality}
-    targets = build_step_targets(projected, horizon_steps=horizon_steps)
+    targets = build_step_targets(
+        projected,
+        horizon_steps=horizon_steps,
+        event_hazard_steps=event_hazard_steps,
+    )
     sequences = window_dialogue(
         features=features,
         targets=targets,
@@ -304,8 +325,9 @@ def extract_causal_audio_features(
     *,
     num_frames: int,
     normalize_vad: bool = True,
+    frame_samples: int = SAMPLE_RATE // 10,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    frames = split_waveform(waveform.float(), num_frames)
+    frames = split_waveform(waveform.float(), num_frames, frame_samples=frame_samples)
     rows = []
     previous = None
     for frame in frames:
@@ -335,12 +357,19 @@ def causal_rolling_vad(rms: torch.Tensor, window_frames: int = 50) -> torch.Tens
     return torch.stack(scores) if scores else torch.empty_like(rms)
 
 
-def split_waveform(waveform: torch.Tensor, num_frames: int) -> list[torch.Tensor]:
+def split_waveform(
+    waveform: torch.Tensor,
+    num_frames: int,
+    *,
+    frame_samples: int = SAMPLE_RATE // 10,
+) -> list[torch.Tensor]:
+    """Split audio on fixed causal frame boundaries, never utterance-wide ratios."""
+
     waveform = waveform.flatten()
-    boundaries = torch.linspace(0, waveform.numel(), steps=num_frames + 1).round().long()
     frames = []
     for idx in range(num_frames):
-        frame = waveform[boundaries[idx] : boundaries[idx + 1]]
+        start = idx * frame_samples
+        frame = waveform[start : start + frame_samples]
         frames.append(frame if frame.numel() else torch.zeros(1))
     return frames
 
@@ -406,7 +435,55 @@ def frame_statistics(frame: torch.Tensor, previous: torch.Tensor | None) -> torc
                 (std - previous[2]).clamp(-1.0, 1.0),
             ]
         )
-    return torch.cat([base, deltas, torch.ones(1)]).float()
+    pitch, voicing = autocorrelation_pitch(frame)
+    log_rms = ((torch.log10(rms.clamp_min(eps)) + 5.0) / 5.0).clamp(0.0, 1.0)
+    if previous is None:
+        pitch_delta = torch.tensor(0.0)
+        voicing_delta = torch.tensor(0.0)
+        log_rms_delta = torch.tensor(0.0)
+    else:
+        pitch_delta = (pitch - previous[25]).clamp(-1.0, 1.0)
+        voicing_delta = (voicing - previous[26]).clamp(-1.0, 1.0)
+        log_rms_delta = (log_rms - previous[27]).clamp(-1.0, 1.0)
+    pitch_features = torch.stack(
+        [
+            pitch,
+            voicing,
+            log_rms,
+            pitch_delta,
+            voicing_delta,
+            log_rms_delta,
+            pitch * voicing,
+        ]
+    )
+    return torch.cat([base, deltas, torch.ones(1), pitch_features]).float()
+
+
+def autocorrelation_pitch(
+    frame: torch.Tensor,
+    *,
+    sample_rate: int = SAMPLE_RATE,
+    minimum_hz: float = 60.0,
+    maximum_hz: float = 400.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return normalized F0 and voicing confidence for one causal frame."""
+
+    centered = frame.float() - frame.float().mean()
+    if centered.numel() < 2 or centered.square().mean() < 1.0e-8:
+        return torch.tensor(0.0), torch.tensor(0.0)
+    fft_size = 1 << max(1, (2 * centered.numel() - 1).bit_length())
+    spectrum = torch.fft.rfft(centered, n=fft_size)
+    correlation = torch.fft.irfft(spectrum * spectrum.conj(), n=fft_size)[: centered.numel()]
+    minimum_lag = max(1, int(sample_rate / maximum_hz))
+    maximum_lag = min(centered.numel() - 1, int(sample_rate / minimum_hz))
+    if maximum_lag <= minimum_lag:
+        return torch.tensor(0.0), torch.tensor(0.0)
+    candidates = correlation[minimum_lag : maximum_lag + 1]
+    relative = int(candidates.argmax())
+    lag = minimum_lag + relative
+    confidence = (candidates[relative] / correlation[0].clamp_min(1.0e-8)).clamp(0.0, 1.0)
+    pitch = torch.tensor(float(sample_rate) / lag / maximum_hz).clamp(0.0, 1.0)
+    return pitch, confidence
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:

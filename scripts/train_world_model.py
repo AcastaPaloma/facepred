@@ -61,6 +61,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--turn-loss-weight", type=float, default=None, help="Override turn-event loss multiplier.")
     parser.add_argument("--yield-loss-weight", type=float, default=None, help="Override safe-yield loss multiplier.")
     parser.add_argument(
+        "--commit-safety-loss-weight",
+        type=float,
+        default=None,
+        help="Override learned commit-verifier loss multiplier.",
+    )
+    parser.add_argument(
+        "--event-hazard-loss-weight",
+        type=float,
+        default=None,
+        help="Override discrete event-time loss multiplier.",
+    )
+    parser.add_argument(
         "--yield-weighting",
         choices=["none", "sqrt_balanced", "capped_balanced", "balanced"],
         default="balanced",
@@ -117,10 +129,18 @@ def main() -> int:
 
     manifest = CacheManifest.load(args.cache_dir)
     yield_enabled = bool(model_cfg.get("heads", {}).get("yield", {}).get("enabled", False))
+    event_hazard_enabled = bool(
+        model_cfg.get("heads", {}).get("event_hazard", {}).get("enabled", False)
+    )
     if yield_enabled and manifest.version < 2:
         raise ValueError(
             "Safe-yield models require cache schema v2. Rebuild the cache under "
             "meld_audio_yield_v2 instead of reusing a v1 cache."
+        )
+    if event_hazard_enabled and manifest.version < 3:
+        raise ValueError(
+            "Event-hazard models require cache schema v3. Rebuild the cache under "
+            "meld_audio_yield_v3 instead of reusing the v2 cache."
         )
     batch_size = int(args.batch_size or train_cfg.get("dataloader", {}).get("batch_size", 32))
     epochs = int(args.epochs or train_cfg.get("trainer", {}).get("max_epochs", 1))
@@ -163,6 +183,16 @@ def main() -> int:
         args.yield_loss_weight
         if args.yield_loss_weight is not None
         else loss_weights.get("yield", 2.0)
+    )
+    loss_weights["commit_safety"] = float(
+        args.commit_safety_loss_weight
+        if args.commit_safety_loss_weight is not None
+        else loss_weights.get("commit_safety", 0.0)
+    )
+    loss_weights["event_hazard"] = float(
+        args.event_hazard_loss_weight
+        if args.event_hazard_loss_weight is not None
+        else loss_weights.get("event_hazard", 0.0)
     )
     yield_pos_weight = compute_yield_pos_weight(
         reference_train_loader,
@@ -256,6 +286,8 @@ def main() -> int:
                 "turn_focal_gamma": args.turn_focal_gamma,
                 "turn_loss_weight": loss_weights["turn_taking"],
                 "yield_loss_weight": loss_weights["yield"],
+                "commit_safety_loss_weight": loss_weights["commit_safety"],
+                "event_hazard_loss_weight": loss_weights["event_hazard"],
                 "yield_weighting": args.yield_weighting,
                 "yield_pos_weight": yield_pos_weight.tolist() if yield_pos_weight is not None else None,
                 "train_sampling": args.train_sampling,
@@ -743,6 +775,8 @@ def append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
 def select_best_score(val_metrics: Mapping[str, float]) -> float:
     if not val_metrics:
         return -float("inf")
+    if "commit_safety_average_precision_mean" in val_metrics:
+        return float(val_metrics["commit_safety_average_precision_mean"])
     if "yield_average_precision_mean" in val_metrics:
         return float(val_metrics["yield_average_precision_mean"])
     if "turn_macro_f1_mean" in val_metrics:
@@ -776,7 +810,7 @@ def classification_weight_specs(
     args: argparse.Namespace,
 ) -> dict[str, tuple[int, str]]:
     heads = model_config.get("heads", {})
-    return {
+    specs = {
         "turn_taking": (
             int(heads.get("turn_taking", {}).get("num_classes", 4)),
             args.turn_class_weighting,
@@ -794,6 +828,11 @@ def classification_weight_specs(
             args.aux_class_weighting,
         ),
     }
+    event_hazard_cfg = heads.get("event_hazard", {})
+    if bool(event_hazard_cfg.get("enabled", False)):
+        bins = len(model_config.get("event_hazard_bins_ms", [200, 500, 1000, 2000]))
+        specs["event_hazard"] = (1 + 3 * bins, args.aux_class_weighting)
+    return specs
 
 
 def compute_yield_pos_weight(
@@ -858,6 +897,7 @@ def compute_class_weights(
         "end_of_turn": "end_of_turn",
         "dialog_act": "dialog_act",
         "affect": "emotion",
+        "event_hazard": "event_hazard",
     }
     counts = {
         component: torch.zeros(num_classes, dtype=torch.float64)
@@ -911,6 +951,8 @@ def training_semantics(
         "turn_focal_gamma": args.turn_focal_gamma,
         "turn_loss_weight": args.turn_loss_weight,
         "yield_loss_weight": args.yield_loss_weight,
+        "commit_safety_loss_weight": args.commit_safety_loss_weight,
+        "event_hazard_loss_weight": args.event_hazard_loss_weight,
         "yield_weighting": args.yield_weighting,
         "yield_pos_weight_cap": args.yield_pos_weight_cap,
         "train_sampling": args.train_sampling,
@@ -1045,7 +1087,11 @@ class MetricAccumulator:
 class WorldMetricAccumulator:
     """Accumulate corpus-level classification metrics across batches."""
 
-    def __init__(self, yield_thresholds: Iterable[float] | None = None) -> None:
+    def __init__(
+        self,
+        yield_thresholds: Iterable[float] | None = None,
+        operating_score_source: str = "yield",
+    ) -> None:
         self.confusions: dict[str, list[torch.Tensor]] = {}
         self.entropy_sum: list[float] = []
         self.entropy_count: list[int] = []
@@ -1053,7 +1099,10 @@ class WorldMetricAccumulator:
         self.yield_labels: list[list[torch.Tensor]] = []
         self.yield_lead_times: list[list[torch.Tensor]] = []
         self.yield_gap_groups: dict[tuple[int, int], tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
+        self.commit_safety_probabilities: list[list[torch.Tensor]] = []
+        self.commit_safety_labels: list[list[torch.Tensor]] = []
         self.yield_thresholds = tuple(float(value) for value in (yield_thresholds or ()))
+        self.operating_score_source = operating_score_source
 
     def update(
         self,
@@ -1088,6 +1137,22 @@ class WorldMetricAccumulator:
                     logits.shape[-1],
                 )
 
+        if "event_hazard_logits" in outputs and "event_hazard" in targets:
+            logits = outputs["event_hazard_logits"]
+            labels = targets["event_hazard"]
+            matrices = self.confusions.setdefault(
+                "event_hazard",
+                [torch.zeros(logits.shape[-1], logits.shape[-1], dtype=torch.long)],
+            )
+            valid = labels != -100
+            if mask is not None:
+                valid &= mask
+            matrices[0] += confusion_matrix(
+                logits.argmax(dim=-1)[valid],
+                labels[valid],
+                logits.shape[-1],
+            )
+
         if "yield_probs" in outputs and "yield" in targets:
             probabilities = outputs["yield_probs"]
             while len(self.yield_probabilities) < probabilities.shape[-1]:
@@ -1121,6 +1186,19 @@ class WorldMetricAccumulator:
                                 probabilities[..., horizon_idx][grouped_valid].detach().float().cpu()
                             )
                             label_chunks.append(labels[grouped_valid].detach().long().cpu())
+
+        if "commit_safety_probs" in outputs and "yield" in targets:
+            probabilities = outputs["commit_safety_probs"]
+            while len(self.commit_safety_probabilities) < probabilities.shape[-1]:
+                self.commit_safety_probabilities.append([])
+                self.commit_safety_labels.append([])
+            for horizon_idx in range(probabilities.shape[-1]):
+                labels = labels_for_horizon(targets["yield"], horizon_idx)
+                valid = valid_for_horizon(labels, targets, mask, horizon_idx)
+                self.commit_safety_probabilities[horizon_idx].append(
+                    probabilities[..., horizon_idx][valid].detach().float().cpu()
+                )
+                self.commit_safety_labels[horizon_idx].append(labels[valid].detach().long().cpu())
 
         if "turn_taking_entropy" in outputs and "turn_taking" in targets:
             entropy = outputs["turn_taking_entropy"]
@@ -1203,11 +1281,7 @@ class WorldMetricAccumulator:
         for horizon_idx, chunks in enumerate(self.yield_probabilities):
             probabilities = torch.cat(chunks) if chunks else torch.empty(0)
             labels = torch.cat(self.yield_labels[horizon_idx]) if chunks else torch.empty(0, dtype=torch.long)
-            threshold = (
-                self.yield_thresholds[horizon_idx]
-                if horizon_idx < len(self.yield_thresholds)
-                else 0.5
-            )
+            threshold = self._threshold_for("yield", horizon_idx)
             horizon_metrics = binary_probability_metrics(probabilities, labels, threshold=threshold)
             metrics[f"yield_operating_threshold/h{horizon_idx}"] = threshold
             for name, value in horizon_metrics.items():
@@ -1223,20 +1297,39 @@ class WorldMetricAccumulator:
             yield_ap.append(horizon_metrics["average_precision"])
         if yield_ap:
             metrics["yield_average_precision_mean"] = float(sum(yield_ap) / len(yield_ap))
+        commit_safety_ap = []
+        for horizon_idx, chunks in enumerate(self.commit_safety_probabilities):
+            probabilities = torch.cat(chunks) if chunks else torch.empty(0)
+            labels = (
+                torch.cat(self.commit_safety_labels[horizon_idx])
+                if chunks
+                else torch.empty(0, dtype=torch.long)
+            )
+            threshold = self._threshold_for("commit_safety", horizon_idx)
+            horizon_metrics = binary_probability_metrics(probabilities, labels, threshold=threshold)
+            metrics[f"commit_safety_operating_threshold/h{horizon_idx}"] = threshold
+            for name, value in horizon_metrics.items():
+                metrics[f"commit_safety_{name}/h{horizon_idx}"] = value
+            commit_safety_ap.append(horizon_metrics["average_precision"])
+        if commit_safety_ap:
+            metrics["commit_safety_average_precision_mean"] = float(
+                sum(commit_safety_ap) / len(commit_safety_ap)
+            )
         for (horizon_idx, group_idx), (probability_chunks, label_chunks) in self.yield_gap_groups.items():
             grouped = binary_probability_metrics(
                 torch.cat(probability_chunks),
                 torch.cat(label_chunks),
-                threshold=(
-                    self.yield_thresholds[horizon_idx]
-                    if horizon_idx < len(self.yield_thresholds)
-                    else 0.5
-                ),
+                threshold=self._threshold_for("yield", horizon_idx),
             )
             group_name = EVENT_GAP_GROUP_NAMES[group_idx]
             for name, value in grouped.items():
                 metrics[f"yield_{name}/h{horizon_idx}/{group_name}"] = value
         return metrics
+
+    def _threshold_for(self, source: str, horizon_idx: int) -> float:
+        if source == self.operating_score_source and horizon_idx < len(self.yield_thresholds):
+            return self.yield_thresholds[horizon_idx]
+        return 0.5
 
     def report(self) -> dict[str, Any]:
         return {

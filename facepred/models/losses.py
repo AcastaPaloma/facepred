@@ -40,6 +40,8 @@ class FacePredLoss(nn.Module):
             "rssm_dynamics": 1.0,
             "turn_taking": 1.0,
             "yield": 2.0,
+            "commit_safety": 0.0,
+            "event_hazard": 0.0,
             "end_of_turn": 0.5,
             "dialog_act": 0.5,
             "affect": 0.3,
@@ -95,6 +97,24 @@ class FacePredLoss(nn.Module):
             )
             components["yield"] = yield_loss
             total = total + self.weights["yield"] * yield_loss
+        if "commit_safety_logits" in predictions and "yield" in targets:
+            commit_safety_loss = masked_binary_cross_entropy(
+                predictions["commit_safety_logits"],
+                targets["yield"],
+                mask=targets.get("horizon_mask", targets.get("mask")),
+                pos_weight=self.yield_pos_weight,
+            )
+            components["commit_safety"] = commit_safety_loss
+            total = total + self.weights["commit_safety"] * commit_safety_loss
+        total = self._add_ce(
+            predictions,
+            targets,
+            total,
+            components,
+            pred_key="event_hazard_logits",
+            target_keys=("event_hazard",),
+            component="event_hazard",
+        )
         total = self._add_ce(
             predictions,
             targets,
@@ -151,6 +171,14 @@ class FacePredLoss(nn.Module):
             )
             components["yield_calibration"] = yield_brier
             total = total + self.weights["calibration"] * yield_brier
+        if "commit_safety_logits" in predictions and "yield" in targets:
+            safety_brier = binary_brier_score(
+                predictions["commit_safety_logits"],
+                targets["yield"],
+                mask=targets.get("horizon_mask", targets.get("mask")),
+            )
+            components["commit_safety_calibration"] = safety_brier
+            total = total + self.weights["calibration"] * safety_brier
 
         components["total"] = total
         return LossOutput(total=total, components=components)

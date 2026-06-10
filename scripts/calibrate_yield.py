@@ -56,7 +56,7 @@ def main() -> int:
         shuffle=False,
         num_workers=0,
     )
-    logits, labels = collect_yield_outputs(model, loader, device)
+    logits, labels, score_source = collect_yield_outputs(model, loader, device)
     temperatures = []
     thresholds = []
     metrics = []
@@ -78,8 +78,9 @@ def main() -> int:
         policy_results.append(policy)
 
     artifact = {
-        "schema_version": 2,
+        "schema_version": 3,
         "type": "safe_yield_temperature_thresholds",
+        "score_source": score_source,
         "checkpoint": str(args.checkpoint),
         "split": args.split,
         "horizons_ms": list(config["model"].get("prediction_horizons_ms", [])),
@@ -103,14 +104,20 @@ def collect_yield_outputs(
     model: FacePredWorldModel,
     loader: object,
     device: torch.device,
-) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor], str]:
     model.eval()
     logits_by_horizon: list[list[torch.Tensor]] = []
     labels_by_horizon: list[list[torch.Tensor]] = []
+    score_source = "yield"
     for batch in loader:
         features, targets = move_training_batch(batch, device)
         outputs = model(features)
-        logits = outputs["yield_logits"]
+        score_source = (
+            "commit_safety"
+            if "commit_safety_logits" in outputs
+            else "yield"
+        )
+        logits = outputs[f"{score_source}_logits"]
         while len(logits_by_horizon) < logits.shape[-1]:
             logits_by_horizon.append([])
             labels_by_horizon.append([])
@@ -122,6 +129,7 @@ def collect_yield_outputs(
     return (
         [torch.cat(values) for values in logits_by_horizon],
         [torch.cat(values) for values in labels_by_horizon],
+        score_source,
     )
 
 
