@@ -18,6 +18,7 @@ from facepred.data import (
 from scripts.prepare_meld_audio_cache import extract_causal_audio_features
 from scripts.prepare_meld_cache import build_event_hazard_targets, build_step_targets
 from scripts.train_world_model import WorldMetricAccumulator
+from scripts.validate_campaign_v5_cache import summarize_cache_build
 
 
 def test_cached_sequence_dataset_round_trip(tmp_path) -> None:
@@ -166,6 +167,25 @@ def test_campaign_v5_cache_validation_accepts_rich_event_hazard_cache(tmp_path) 
     contract = validate_event_hazard_cache(tmp_path, splits=("train",))
 
     assert contract["event_hazard_bins_ms"] == [200, 500, 1000, 2000]
+
+
+def test_campaign_v5_cache_build_summary_reports_interrupted_progress(tmp_path) -> None:
+    (tmp_path / "extraction_config.json").write_text("{}", encoding="utf-8")
+    for split, count in {"train": 3, "dev": 2, "test": 1}.items():
+        progress_dir = tmp_path / ".progress" / split
+        progress_dir.mkdir(parents=True)
+        for index in range(count):
+            (progress_dir / f"{index}.pt").touch()
+    train_dir = tmp_path / "train"
+    train_dir.mkdir()
+    (train_dir / "train_0000.pt").touch()
+
+    summary = summarize_cache_build(tmp_path)
+
+    assert summary["manifest_exists"] is False
+    assert summary["extraction_config_exists"] is True
+    assert summary["progress_dialogues"] == {"train": 3, "dev": 2, "test": 1}
+    assert summary["shards"] == {"train": 1, "dev": 0, "test": 0}
 
 
 def test_event_balanced_weights_allocate_mass_by_window_group() -> None:

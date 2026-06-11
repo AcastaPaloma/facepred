@@ -21,9 +21,49 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def summarize_cache_build(cache_dir: str | Path) -> dict[str, object]:
+    root = Path(cache_dir)
+    progress_root = root / ".progress"
+    split_names = ("train", "dev", "test")
+    return {
+        "cache_dir": str(root),
+        "manifest_exists": (root / "manifest.json").exists(),
+        "extraction_config_exists": (root / "extraction_config.json").exists(),
+        "progress_dialogues": {
+            split: len(list((progress_root / split).glob("*.pt")))
+            for split in split_names
+        },
+        "shards": {
+            split: len(list((root / split).glob(f"{split}_*.pt")))
+            for split in split_names
+        },
+    }
+
+
 def main() -> int:
     args = parse_args()
-    contract = validate_event_hazard_cache(args.cache_dir, splits=args.splits)
+    try:
+        contract = validate_event_hazard_cache(args.cache_dir, splits=args.splits)
+    except FileNotFoundError as exc:
+        progress = summarize_cache_build(args.cache_dir)
+        print(
+            json.dumps(
+                {
+                    "campaign_v5_cache_valid": False,
+                    "error": str(exc),
+                    "recovery": (
+                        "Resume scripts/prepare_meld_audio_cache.py with the same arguments. "
+                        "Do not delete .progress; completed dialogues will be reused. Validate "
+                        "again only after preparation prints the manifest path."
+                    ),
+                    **progress,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     print(json.dumps({"campaign_v5_cache_valid": True, **contract}, indent=2, sort_keys=True))
     return 0
 
